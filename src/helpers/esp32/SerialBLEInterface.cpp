@@ -13,12 +13,16 @@
 void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code) {
   _pin_code = pin_code;
 
-  if (strcmp(name, "@@MAC") == 0) {
+  if (strcmp(name, "@@MAC") == 0 || strcmp(name, "@@MAC4") == 0) {
     uint8_t addr[8];
     memset(addr, 0, sizeof(addr));
     esp_efuse_mac_get_default(addr);
-    sprintf(name, "%02X%02X%02X%02X%02X%02X",    // modify (IN-OUT param)
-          addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
+    if (strcmp(name, "@@MAC4") == 0) {
+      sprintf(name, "%02X%02X", addr[4], addr[5]);  // last 4 hex digits
+    } else {
+      sprintf(name, "%02X%02X%02X%02X%02X%02X",    // modify (IN-OUT param)
+            addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
+    }
   }
   char dev_name[32+16];
   sprintf(dev_name, "%s%s", prefix, name);

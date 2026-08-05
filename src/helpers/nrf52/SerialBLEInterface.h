@@ -56,7 +56,7 @@ public:
   /**
    * init the BLE interface.
    * @param prefix   a prefix for the device name
-   * @param name  IN/OUT - a name for the device (combined with prefix). If "@@MAC", is modified and returned
+   * @param name  IN/OUT - a name for the device (combined with prefix). If "@@MAC" or "@@MAC4", is modified and returned
    * @param pin_code   the BLE security pin
    */
   void begin(const char* prefix, char* name, uint32_t pin_code);

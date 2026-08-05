@@ -186,7 +186,31 @@ void setup() {
 
 // add bluetooth interface
 #if defined(BLE_PIN_CODE)
-  bluetooth_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
+  #if defined(BLE_DEVICE_NAME)
+    // BLE advertise name independent of saved node_name (e.g. "@@MAC4" -> FEB8)
+    char ble_device_name[16];
+    strncpy(ble_device_name, BLE_DEVICE_NAME, sizeof(ble_device_name) - 1);
+    ble_device_name[sizeof(ble_device_name) - 1] = 0;
+    bluetooth_interface.begin(BLE_NAME_PREFIX, ble_device_name, the_mesh.getBLEPin());
+    // Keep OLED/App default name in sync with BLE (Meshnology-XXXX), unless user renamed
+    {
+      NodePrefs *prefs = the_mesh.getNodePrefs();
+      bool sync = (strcmp(prefs->node_name, "@@MAC4") == 0 || strcmp(prefs->node_name, "@@MAC") == 0);
+#ifdef ADVERT_NAME
+      sync = sync || (strcmp(prefs->node_name, ADVERT_NAME) == 0);
+#endif
+      // Migrate previous fixed model defaults
+      sync = sync || (strcmp(prefs->node_name, "Meshnology-W12") == 0 ||
+                      strcmp(prefs->node_name, "Meshnology-W13") == 0 ||
+                      strcmp(prefs->node_name, "Meshnology-W15") == 0);
+      if (sync) {
+        snprintf(prefs->node_name, sizeof(prefs->node_name), "%s%s", BLE_NAME_PREFIX, ble_device_name);
+        the_mesh.savePrefs();
+      }
+    }
+  #else
+    bluetooth_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
+  #endif
   interface_manager.addInterface(InterfaceType::Bluetooth, &bluetooth_interface);
 #endif
 
