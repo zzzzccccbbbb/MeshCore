@@ -3,120 +3,129 @@
 #include <RadioLib.h>
 #include "MeshCore.h"
 
-#ifndef LR2021_IRQ_DIO
-  #define LR2021_IRQ_DIO 5
-#endif
-
 class CustomLR2021 : public LR2021 {
+  uint32_t _preambleMillis = 66;
+  uint32_t _maxPayloadMillis = 3934;
+  uint32_t _activityAt = 0;
+  bool _headerSeen = false;
   bool _rx_boosted = false;
 
-public:
-  CustomLR2021(Module *mod) : LR2021(mod) {
-    irqDioNum = LR2021_IRQ_DIO;
-  }
+  public:
+    CustomLR2021(Module *mod) : LR2021(mod) { irqDioNum = LR2021_IRQ_DIO; }
 
-  float getFreqMHz() const { return freqMHz; }
+    bool std_init(SPIClass* spi = NULL)
+    {
+      
+  #ifdef LR2021_TCXO_VOLTAGE
+      float tcxo = LR2021_TCXO_VOLTAGE;
+  #else
+      float tcxo = 1.6f;
+  #endif
 
-  uint8_t getSpreadingFactor() const { return spreadingFactor; }
+  #ifdef LORA_CR
+      uint8_t cr = LORA_CR;
+  #else
+      uint8_t cr = 5;
+  #endif
 
-  int16_t setRxBoostedGainMode(uint8_t level) {
-    _rx_boosted = (level > 0);
-    return LR2021::setRxBoostedGainMode(level);
-  }
+  #if defined(P_LORA_SCLK)
+    #ifdef NRF52_PLATFORM
+      if (spi) { spi->setPins(P_LORA_MISO, P_LORA_SCLK, P_LORA_MOSI); spi->begin(); }
+    #elif defined(RP2040_PLATFORM)
+      if (spi) {
+        spi->setMISO(P_LORA_MISO);
+        //spi->setCS(P_LORA_NSS); // Setting CS results in freeze
+        spi->setSCK(P_LORA_SCLK);
+        spi->setMOSI(P_LORA_MOSI);
+        spi->begin();
+      }
+    #else
+      if (spi) spi->begin(P_LORA_SCLK, P_LORA_MISO, P_LORA_MOSI);
+    #endif
+  #endif
+      int status = begin(LORA_FREQ, LORA_BW, LORA_SF, cr, RADIOLIB_LR2021_LORA_SYNC_WORD_PRIVATE, LORA_TX_POWER, 16, tcxo);
+      // if radio init fails with -707/-706, try again with tcxo voltage set to 0.0f
+      if (status == RADIOLIB_ERR_SPI_CMD_FAILED || status == RADIOLIB_ERR_SPI_CMD_INVALID) {
+        tcxo = 0.0f;
+        status = begin(LORA_FREQ, LORA_BW, LORA_SF, cr, RADIOLIB_LR2021_LORA_SYNC_WORD_PRIVATE, LORA_TX_POWER, 16, tcxo);
+      }
+      if (status != RADIOLIB_ERR_NONE) {
+        Serial.print("ERROR: radio init failed: ");
+        Serial.println(status);
+        return false;  // fail
+      }
+    
+      setCRC(2);
+      explicitHeader();
 
-  bool getRxBoostedGainMode() const { return _rx_boosted; }
+      
+    #ifdef LR2021_RX_BOOSTED_GAIN
+      setRxBoostedGainMode(LR2021_RX_BOOSTED_GAIN);
+    #endif
 
-  bool isReceiving() {
-    uint32_t irq = getIrqStatus();
-#ifdef RADIOLIB_LR2021_IRQ_PREAMBLE_DETECTED
-    bool detected = (irq & RADIOLIB_LR2021_IRQ_LORA_HEADER_VALID) ||
-                    (irq & RADIOLIB_LR2021_IRQ_PREAMBLE_DETECTED);
-#else
-    bool detected = (irq & RADIOLIB_LR11X0_IRQ_SYNC_WORD_HEADER_VALID) ||
-                    (irq & RADIOLIB_LR11X0_IRQ_PREAMBLE_DETECTED);
-#endif
-    return detected;
-  }
-
-  // AM36-FN / LR2021MB1LDZCS switchless: DIO8/9 Sub-G TX/RX, DIO10/11 2.4G RX/TX
-  void configureAm36RfSwitch() {
-    static const uint32_t rfswitch_dio_pins[] = {
-      RADIOLIB_LR2021_DIO8,
-      RADIOLIB_LR2021_DIO9,
-      RADIOLIB_LR2021_DIO10,
-      RADIOLIB_LR2021_DIO11,
-      RADIOLIB_NC,
-    };
-
-    static const Module::RfSwitchMode_t rfswitch_table[] = {
-      {LR2021::MODE_STBY,  {LOW, LOW,  LOW,  LOW}},
-      {LR2021::MODE_RX,    {LOW, HIGH, LOW,  LOW}},  // DIO9  = Sub-G RX
-      {LR2021::MODE_TX,    {HIGH, LOW, LOW,  LOW}},  // DIO8  = Sub-G TX
-      {LR2021::MODE_RX_HF, {LOW, LOW,  HIGH, LOW}},  // DIO10 = 2.4G RX
-      {LR2021::MODE_TX_HF, {LOW, LOW,  LOW,  HIGH}}, // DIO11 = 2.4G TX
-      END_OF_MODE_TABLE,
-    };
-
-    setRfSwitchTable(rfswitch_dio_pins, rfswitch_table);
-  }
-
-  // W12-MB external PA (w12_factory smtc_shield_lr2021mb1ldzcs):
-  // DIO5=2.4G TXEN, DIO6=2.4G RXEN, DIO9=CTX, DIO10=CPS, DIO11=CSD
-  void configureW12ExternalPaRfSwitch() {
-    static const uint32_t rfswitch_dio_pins[] = {
-      RADIOLIB_LR2021_DIO5,
-      RADIOLIB_LR2021_DIO6,
-      RADIOLIB_LR2021_DIO9,
-      RADIOLIB_LR2021_DIO10,
-      RADIOLIB_LR2021_DIO11,
-    };
-
-    static const Module::RfSwitchMode_t rfswitch_table[] = {
-      //                  DIO5  DIO6  DIO9  DIO10 DIO11
-      {LR2021::MODE_STBY,  {LOW,  LOW,  LOW,  LOW,  LOW}},
-      {LR2021::MODE_RX,    {LOW,  LOW,  LOW,  LOW,  HIGH}}, // CSD on RX_LF
-      {LR2021::MODE_TX,    {LOW,  LOW,  HIGH, HIGH, HIGH}}, // CTX+CPS+CSD on TX_LF
-      {LR2021::MODE_RX_HF, {LOW,  HIGH, LOW,  LOW,  LOW}},  // 2.4G RXEN
-      {LR2021::MODE_TX_HF, {HIGH, LOW,  LOW,  LOW,  LOW}},  // 2.4G TXEN
-      END_OF_MODE_TABLE,
-    };
-
-    setRfSwitchTable(rfswitch_dio_pins, rfswitch_table);
-  }
-
-  bool std_init(SPIClass *spi = NULL) {
-#if defined(ESP32) && defined(P_LORA_SCLK)
-    if (spi) {
-      spi->begin(P_LORA_SCLK, P_LORA_MISO, P_LORA_MOSI);
+      return true;  // success
     }
-#else
-    (void)spi;
-#endif
+    
+    float getFreqMHz() const { return freqMHz; }
 
-    // XTAL module: tcxoVoltage must be 0 (non-zero causes -706/-707 on XTAL parts)
-    tcxoVoltage = 0.0f;
+    bool getRxBoostedGainMode() const { return _rx_boosted; }
 
-    int status = begin(LORA_FREQ, LORA_BW, LORA_SF, 5,
-                       RADIOLIB_LR2021_LORA_SYNC_WORD_PRIVATE,
-                       LORA_TX_POWER, 16, 0.0f);
-    if (status != RADIOLIB_ERR_NONE) {
-      MESH_DEBUG_PRINTLN("LR2021: radio init failed: %d", status);
+    int16_t startReceive() override {
+      // include the PREAMBLE_DETECTED irq bit in reported flags
+      return LR2021::startReceive(RADIOLIB_LR2021_RX_TIMEOUT_INF, RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_LR2021_IRQ_PREAMBLE_DETECTED), RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
+    }
+
+    bool isReceiving() {
+      uint32_t irq = getIrqStatus();
+      bool preamble = irq & RADIOLIB_LR2021_IRQ_PREAMBLE_DETECTED;  // bit 5
+      bool header   = irq & RADIOLIB_LR2021_IRQ_LORA_HEADER_VALID;  // bit 6
+      bool hdrErr   = irq & RADIOLIB_LR2021_IRQ_LORA_HDR_CRC_ERROR; // bit 9
+      uint32_t now  = millis();
+      if (hdrErr) {
+        clearIrqFlags(RADIOLIB_LR2021_IRQ_PREAMBLE_DETECTED | RADIOLIB_LR2021_IRQ_LORA_HEADER_VALID | RADIOLIB_LR2021_IRQ_LORA_HDR_CRC_ERROR);
+        _activityAt = 0;
+        _headerSeen = false;
+        return false;
+      }
+      if (!header && _headerSeen) {
+        // something cleared the header flag, reset our state.
+        _activityAt = 0; _headerSeen = false;
+        return false;
+      }
+
+      if (header) {
+        if (!_headerSeen) { _headerSeen = true; _activityAt = now; };
+        if (now - _activityAt > _maxPayloadMillis) {
+          MESH_DEBUG_PRINTLN("Clearing header IRQ after %ums", _maxPayloadMillis);
+          clearIrqFlags(RADIOLIB_LR2021_IRQ_PREAMBLE_DETECTED | RADIOLIB_LR2021_IRQ_LORA_HEADER_VALID | RADIOLIB_LR2021_IRQ_LORA_HDR_CRC_ERROR);
+          _activityAt = 0; _headerSeen = false;
+          return false;
+        }
+        return true;
+      }
+      if (preamble) {
+        if (_activityAt == 0) _activityAt = now;
+        if (now - _activityAt > _preambleMillis) {
+          clearIrqFlags(RADIOLIB_LR2021_IRQ_PREAMBLE_DETECTED);
+          _activityAt = 0;
+          MESH_DEBUG_PRINTLN("Clearing preamble IRQ after %ums", _preambleMillis);
+          return false;
+        }
+        return true;
+      }
+      _activityAt = 0; _headerSeen = false;
       return false;
     }
+    
+    void setPreambleMillis(uint32_t preambleMillis) {
+      _preambleMillis = preambleMillis;
+      MESH_DEBUG_PRINTLN("Set _preambleMillis=%u", _preambleMillis);
+    }
+    void setMaxPayloadMillis(uint32_t payloadMillis) {
+      _maxPayloadMillis = payloadMillis;
+      MESH_DEBUG_PRINTLN("Set _maxPayloadMillis=%u", _maxPayloadMillis);
+    }
 
-#ifdef LR2021_AM36_RF_SWITCH
-    configureAm36RfSwitch();
-#endif
 
-#ifdef LR2021_W12_RF_SWITCH
-    configureW12ExternalPaRfSwitch();
-#endif
-
-#if defined(LR2021_RX_BOOST_LEVEL)
-    setRxBoostedGainMode(LR2021_RX_BOOST_LEVEL);
-#endif
-
-    setCRC(1);
-    return true;
-  }
+    uint8_t getSpreadingFactor() const { return spreadingFactor; }
 };
