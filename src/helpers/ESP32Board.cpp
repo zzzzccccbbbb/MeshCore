@@ -1,7 +1,7 @@
 #ifdef ESP_PLATFORM
 
-#include "ESP32Board.h"
 #include <target.h>
+#include "ESP32Board.h"
 
 #if defined(ADMIN_PASSWORD) && !defined(DISABLE_WIFI_OTA)   // Repeater or Room Server only
 #include <WiFi.h>

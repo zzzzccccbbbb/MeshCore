@@ -95,6 +95,14 @@ class CustomSX1262 : public SX1262 {
     writeRegister(0x8B5, &r_data, 1);
   #endif
 
+  #ifdef MESHNOLOGY_W10
+      // Factory xtal load-cap trim (must be written in STDBY_XOSC)
+      standby(RADIOLIB_SX126X_STANDBY_XOSC);
+      uint8_t xtal_trim[2] = {0x17, 0x17};
+      writeRegister(0x0911, xtal_trim, 2);  // XTA/XTB
+      standby();
+  #endif
+
       MESH_DEBUG_PRINTLN("SX1262 status=0x%02X device_errors=0x%04X", getStatus(), getDeviceErrors());
 
       return true;  // success
