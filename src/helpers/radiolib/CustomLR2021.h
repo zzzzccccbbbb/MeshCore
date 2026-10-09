@@ -40,18 +40,35 @@ class CustomLR2021 : public LR2021 {
         spi->begin();
       }
     #else
-      if (spi) spi->begin(P_LORA_SCLK, P_LORA_MISO, P_LORA_MOSI);
+      if (spi) spi->begin(P_LORA_SCLK, P_LORA_MISO, P_LORA_MOSI, -1);
     #endif
   #endif
+#ifdef LR2021_IRQ_DIO
+      irqDioNum = LR2021_IRQ_DIO;
+#endif
+
       int status = begin(LORA_FREQ, LORA_BW, LORA_SF, cr, RADIOLIB_LR2021_LORA_SYNC_WORD_PRIVATE, LORA_TX_POWER, 16, tcxo);
-      // if radio init fails with -707/-706, try again with tcxo voltage set to 0.0f
+      // SPI cmd errors: retry with TCXO disabled (XTAL boards)
       if (status == RADIOLIB_ERR_SPI_CMD_FAILED || status == RADIOLIB_ERR_SPI_CMD_INVALID) {
+        Serial.printf("LR2021: SPI cmd err %d, retry XTAL\n", status);
         tcxo = 0.0f;
         status = begin(LORA_FREQ, LORA_BW, LORA_SF, cr, RADIOLIB_LR2021_LORA_SYNC_WORD_PRIVATE, LORA_TX_POWER, 16, tcxo);
       }
+      // CHIP_NOT_FOUND (-2): re-power settle + retry once (W20 EN regulator / SPI settle)
+      if (status == RADIOLIB_ERR_CHIP_NOT_FOUND) {
+        Serial.println("LR2021: CHIP_NOT_FOUND, reset+retry...");
+        delay(200);
+        status = begin(LORA_FREQ, LORA_BW, LORA_SF, cr, RADIOLIB_LR2021_LORA_SYNC_WORD_PRIVATE, LORA_TX_POWER, 16, tcxo);
+        if (status == RADIOLIB_ERR_CHIP_NOT_FOUND && tcxo != 0.0f) {
+          tcxo = 0.0f;
+          status = begin(LORA_FREQ, LORA_BW, LORA_SF, cr, RADIOLIB_LR2021_LORA_SYNC_WORD_PRIVATE, LORA_TX_POWER, 16, tcxo);
+        }
+      }
       if (status != RADIOLIB_ERR_NONE) {
-        Serial.print("ERROR: radio init failed: ");
-        Serial.println(status);
+        uint8_t maj = 0, min = 0;
+        int16_t vs = getVersion(&maj, &min);
+        Serial.printf("ERROR: radio init failed: %d (getVersion rc=%d fw=%u.%u)\n",
+                      status, (int)vs, (unsigned)maj, (unsigned)min);
         return false;  // fail
       }
     

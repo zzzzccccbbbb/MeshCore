@@ -215,7 +215,11 @@ void GxEPDDisplay::endFrame() {
   if (_isOn == false) return;
   uint32_t crc = display_crc.finalize();
   if (crc != last_display_crc_value) {
+#if defined(EINK_FORCE_FULL_REFRESH) && EINK_FORCE_FULL_REFRESH
+    display.display(false);  // panels without partial update (e.g. DEPG0310)
+#else
     display.display(true);
+#endif
     if (_cycles_before_full_refresh > 0) {
       _cycles_before_full_refresh--;
     }

@@ -47,7 +47,8 @@ static File openWrite(FILESYSTEM* fs, const char* filename) {
 #endif
 
 void DataStore::begin() {
-#if defined(RP2040_PLATFORM)
+#if defined(RP2040_PLATFORM) || defined(ESP32)
+  /* LittleFS needs parent dirs; SPIFFS often created them implicitly. */
   identity_store.begin();
 #endif
 
@@ -65,6 +66,7 @@ void DataStore::begin() {
 
 #if defined(ESP32)
   #include <SPIFFS.h>
+  #include <LittleFS.h>
   #include <nvs_flash.h>
 #elif defined(RP2040_PLATFORM)
   #include <LittleFS.h>
@@ -102,7 +104,11 @@ lfs_ssize_t _getLfsUsedBlockCount(FILESYSTEM* fs) {
 
 uint32_t DataStore::getStorageUsedKb() const {
 #if defined(ESP32)
+  #if defined(MESHNOLOGY_W20)
+  return LittleFS.usedBytes() / 1024;
+  #else
   return SPIFFS.usedBytes() / 1024;
+  #endif
 #elif defined(RP2040_PLATFORM)
   FSInfo info;
   info.usedBytes = 0;
@@ -120,7 +126,11 @@ uint32_t DataStore::getStorageUsedKb() const {
 
 uint32_t DataStore::getStorageTotalKb() const {
 #if defined(ESP32)
+  #if defined(MESHNOLOGY_W20)
+  return LittleFS.totalBytes() / 1024;
+  #else
   return SPIFFS.totalBytes() / 1024;
+  #endif
 #elif defined(RP2040_PLATFORM)
   FSInfo info;
   info.totalBytes = 0;
@@ -173,7 +183,11 @@ bool DataStore::formatFileSystem() {
 #elif defined(RP2040_PLATFORM)
   return LittleFS.format();
 #elif defined(ESP32)
+  #if defined(MESHNOLOGY_W20)
+  bool fs_success = LittleFS.format();
+  #else
   bool fs_success = ((fs::SPIFFSFS *)_fs)->format();
+  #endif
   esp_err_t nvs_err = nvs_flash_erase(); // no need to reinit, will be done by reboot
   return fs_success && (nvs_err == ESP_OK);
 #else

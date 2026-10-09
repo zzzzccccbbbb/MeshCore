@@ -1,8 +1,7 @@
-#include <Arduino.h>   // needed for PlatformIO
+#include <Arduino.h>
 #include <Mesh.h>
 #include "MyMesh.h"
 
-// Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
   uint32_t n = 0;
   while (*sp && *sp >= '0' && *sp <= '9') {
@@ -12,32 +11,23 @@ static uint32_t _atoi(const char* sp) {
   return n;
 }
 
-// interface manager
 #include <helpers/MultiSerialInterface.h>
 MultiSerialInterface interface_manager;
 
-// include bluetooth interface
 #if defined(BLE_PIN_CODE)
   #ifdef ESP32
-    // include esp32 bluetooth interface
     #include <helpers/esp32/SerialBLEInterface.h>
-    SerialBLEInterface bluetooth_interface;
-  #elif defined(NRF52_PLATFORM)
-    // include nrf52 bluetooth interface
-    #include <helpers/nrf52/SerialBLEInterface.h>
     SerialBLEInterface bluetooth_interface;
   #else
     #error "SerialBLEInterface is not defined for this platform"
   #endif
 #endif
 
-// include wifi interface
 #ifdef WIFI_SSID
   #ifndef TCP_PORT
     #define TCP_PORT 5000
   #endif
   #ifdef ESP32
-    // include esp32 wifi interface
     #include <helpers/esp32/SerialWifiInterface.h>
     SerialWifiInterface wifi_interface;
   #else
@@ -45,52 +35,37 @@ MultiSerialInterface interface_manager;
   #endif
 #endif
 
-// include usb interface
 #if defined(ENABLE_USB_INTERFACE)
   #include <helpers/ArduinoSerialInterface.h>
   ArduinoSerialInterface usb_serial_interface;
 #endif
 
-// include ethernet interface
-#if defined(ETHERNET_ENABLED)
-  #include <helpers/ethernet/EthernetInterface.h>
-  ETHERNET_CLASS ethernet_interface;
-#endif
-
-// include hardware serial interface
 #if defined(SERIAL_RX)
   #include <helpers/ArduinoSerialInterface.h>
   ArduinoSerialInterface hardware_serial_interface;
   HardwareSerial companion_serial(1);
 #endif
 
-// platform file system
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  #include <InternalFileSystem.h>
-  #if defined(QSPIFLASH)
-    #include <CustomLFS_QSPIFlash.h>
-    DataStore store(InternalFS, QSPIFlash, rtc_clock);
+#if defined(ESP32)
+  #if defined(MESHNOLOGY_W20)
+    #include <LittleFS.h>
+    DataStore store(LittleFS, rtc_clock);
   #else
-    #if defined(EXTRAFS)
-      #include <CustomLFS.h>
-      CustomLFS ExtraFS(0xD4000, 0x19000, 128);
-      DataStore store(InternalFS, ExtraFS, rtc_clock);
-    #else
-      DataStore store(InternalFS, rtc_clock);
-    #endif
+    #include <SPIFFS.h>
+    DataStore store(SPIFFS, rtc_clock);
   #endif
-#elif defined(RP2040_PLATFORM)
-  #include <LittleFS.h>
-  DataStore store(LittleFS, rtc_clock);
-#elif defined(ESP32)
-  #include <SPIFFS.h>
-  DataStore store(SPIFFS, rtc_clock);
+#else
+  #error "W20 MeshCore deck build requires ESP32"
 #endif
 
-/* GLOBAL OBJECTS */
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
   UITask ui_task(&board, &interface_manager);
+#endif
+
+#if defined(USE_W20_DECKPRO_SHELL)
+  #include "platform/w20_deckpro_shell/w20_deckpro_shell.h"
+  #include "platform/w20_deckpro_shell/w20_meshcore_ui.h"
 #endif
 
 StdRNG fast_rng;
@@ -101,13 +76,10 @@ MyMesh the_mesh(radio_driver, fast_rng, rtc_clock, tables, store
    #endif
 );
 
-/* END GLOBAL OBJECTS */
-
 void halt() {
   while (1) ;
 }
 
-/* WIFI RECONNECT TRACKERS */
 #if defined(ESP32) && defined(WIFI_SSID)
   bool wifi_needs_reconnect = false;
   unsigned long last_wifi_reconnect_attempt = 0;
@@ -115,94 +87,94 @@ void halt() {
 
 void setup() {
   Serial.begin(115200);
-  board.begin();
 
-#ifdef HAS_EXTERNAL_WATCHDOG
-  external_watchdog.begin();
+#if defined(MESHNOLOGY_W20)
+  /* Meshtastic W20: EN/CS before splash so LORA3V3 settles during EPD draw */
+  #include "platform/w20_deckpro/utilities.h"
+  #include <Wire.h>
+  #include <driver/gpio.h>
+  /* Soft-sleep may leave gpio_hold on EN/NSS; release before digitalWrite. */
+  gpio_hold_dis((gpio_num_t)P_LORA_EN);
+  gpio_hold_dis((gpio_num_t)P_LORA_NSS);
+  gpio_deep_sleep_hold_dis();
+  pinMode(P_LORA_EN, OUTPUT);
+  digitalWrite(P_LORA_EN, HIGH);
+  pinMode(P_LORA_NSS, OUTPUT);
+  digitalWrite(P_LORA_NSS, HIGH);
+  pinMode(BOARD_EPD_CS, OUTPUT);
+  digitalWrite(BOARD_EPD_CS, HIGH);
+  Serial.printf("W20 boot: LORA_EN=%d NSS=%d (pre-splash)\n",
+                digitalRead(P_LORA_EN), digitalRead(P_LORA_NSS));
 #endif
 
-#ifdef DISPLAY_CLASS
-  DisplayDriver* disp = NULL;
-  if (display.begin()) {
-    disp = &display;
-    disp->startFrame();
-  #ifdef ST7789
-    disp->setTextSize(2);
-  #endif
-    disp->drawTextCentered(disp->width() / 2, 28, "Loading...");
-    disp->endFrame();
+#if defined(USE_W20_DECKPRO_SHELL)
+  /* 极早 splash（与 meshtastic W20 一致），再做射频/mesh 长初始化 */
+  w20_deckpro_early_splash();
+#endif
+
+#if defined(MESHNOLOGY_W20)
+  /* EN already high during splash (~1.4s settle). Idle NSS/BUSY before HAL claims SPI. */
+  pinMode(P_LORA_NSS, OUTPUT);
+  digitalWrite(P_LORA_NSS, HIGH);
+  pinMode(P_LORA_RESET, OUTPUT);
+  digitalWrite(P_LORA_RESET, HIGH);
+  pinMode(P_LORA_BUSY, INPUT_PULLUP);
+  /* Wire for RTC inside radio_init(); board.begin() must not steal NSS after HAL. */
+  Wire.begin(PIN_BOARD_SDA, PIN_BOARD_SCL);
+  const bool radio_ok = radio_init();
+  if (!radio_ok) {
+    Serial.printf("WARNING: radio_init failed; EN=%d continuing Deck without Mesh RF\n",
+                  digitalRead(P_LORA_EN));
+  }
+  board.begin();
+#else
+  board.begin();
+  const bool radio_ok = radio_init();
+  if (!radio_ok) {
+    Serial.println("WARNING: radio_init failed; booting UI without LoRa/Mesh RF");
   }
 #endif
 
-  if (!radio_init()) { halt(); }
+  // getRngSeed needs a live radio; fall back so identity still works offline
+  fast_rng.begin(radio_ok ? radio_driver.getRngSeed() : (uint32_t)esp_random());
 
-  fast_rng.begin(radio_driver.getRngSeed());
-
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  InternalFS.begin();
-  #if defined(QSPIFLASH)
-    if (!QSPIFlash.begin()) {
-      // debug output might not be available at this point, might be too early. maybe should fall back to InternalFS here?
-      MESH_DEBUG_PRINTLN("CustomLFS_QSPIFlash: failed to initialize");
-    } else {
-      MESH_DEBUG_PRINTLN("CustomLFS_QSPIFlash: initialized successfully");
-    }
-  #else
-  #if defined(EXTRAFS)
-      ExtraFS.begin();
-  #endif
-  #endif
-  store.begin();
-  the_mesh.begin(
-    #ifdef DISPLAY_CLASS
-        disp != NULL
-    #else
-        false
-    #endif
-  );
-#elif defined(RP2040_PLATFORM)
-  LittleFS.begin();
-  store.begin();
-  the_mesh.begin(
-    #ifdef DISPLAY_CLASS
-        disp != NULL
-    #else
-        false
-    #endif
-  );
-#elif defined(ESP32)
-  SPIFFS.begin(true);
-  store.begin();
-  the_mesh.begin(
-    #ifdef DISPLAY_CLASS
-        disp != NULL
-    #else
-        false
-    #endif
-  );
+#if defined(MESHNOLOGY_W20)
+  if (!LittleFS.begin(true)) {
+    Serial.println("ERROR: LittleFS mount failed");
+  } else {
+    LittleFS.mkdir("/identity");
+    LittleFS.mkdir("/bl");
+  }
 #else
-  #error "need to define filesystem"
+  SPIFFS.begin(true);
 #endif
+  store.begin();
+  the_mesh.begin(
+#if defined(USE_W20_DECKPRO_SHELL)
+      true
+#elif defined(DISPLAY_CLASS)
+      false /* display.begin deferred to shell */
+#else
+      false
+#endif
+  );
 
-// add bluetooth interface
 #if defined(BLE_PIN_CODE)
   #if defined(BLE_DEVICE_NAME)
-    // BLE advertise name independent of saved node_name (e.g. "@@MAC4" -> FEB8)
     char ble_device_name[16];
     strncpy(ble_device_name, BLE_DEVICE_NAME, sizeof(ble_device_name) - 1);
     ble_device_name[sizeof(ble_device_name) - 1] = 0;
     bluetooth_interface.begin(BLE_NAME_PREFIX, ble_device_name, the_mesh.getBLEPin());
-    // Keep OLED/App default name in sync with BLE (Meshnology-XXXX), unless user renamed
     {
       NodePrefs *prefs = the_mesh.getNodePrefs();
       bool sync = (strcmp(prefs->node_name, "@@MAC4") == 0 || strcmp(prefs->node_name, "@@MAC") == 0);
 #ifdef ADVERT_NAME
       sync = sync || (strcmp(prefs->node_name, ADVERT_NAME) == 0);
 #endif
-      // Migrate previous fixed model defaults
       sync = sync || (strcmp(prefs->node_name, "Meshnology-W12") == 0 ||
                       strcmp(prefs->node_name, "Meshnology-W13") == 0 ||
-                      strcmp(prefs->node_name, "Meshnology-W15") == 0);
+                      strcmp(prefs->node_name, "Meshnology-W15") == 0 ||
+                      strcmp(prefs->node_name, "Meshnology-W20") == 0);
       if (sync) {
         snprintf(prefs->node_name, sizeof(prefs->node_name), "%s%s", BLE_NAME_PREFIX, ble_device_name);
         the_mesh.savePrefs();
@@ -214,39 +186,26 @@ void setup() {
   interface_manager.addInterface(InterfaceType::Bluetooth, &bluetooth_interface);
 #endif
 
-// add wifi interface
 #ifdef WIFI_SSID
-  board.setInhibitSleep(true);   // prevent sleep when WiFi is active
+  board.setInhibitSleep(true);
   WiFi.setAutoReconnect(true);
-
   WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info){
       if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
-          WIFI_DEBUG_PRINTLN("WiFi disconnected. Flagging for reconnect...");
           wifi_needs_reconnect = true;
       } else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
-          WIFI_DEBUG_PRINTLN("WiFi connected successfully!");
           wifi_needs_reconnect = false;
       }
   });
-
   WiFi.begin(WIFI_SSID, WIFI_PWD);
   wifi_interface.begin(TCP_PORT);
   interface_manager.addInterface(InterfaceType::WiFi, &wifi_interface);
 #endif
 
-// add usb interface
 #if defined(ENABLE_USB_INTERFACE)
   usb_serial_interface.begin(Serial);
   interface_manager.addInterface(InterfaceType::USB, &usb_serial_interface);
 #endif
 
-// add ethernet interface
-#if defined(ETHERNET_ENABLED)
-  ethernet_interface.begin();
-  interface_manager.addInterface(InterfaceType::Ethernet, &ethernet_interface);
-#endif
-
-// add hardware serial interface
 #if defined(SERIAL_RX)
   companion_serial.setPins(SERIAL_RX, SERIAL_TX);
   companion_serial.begin(115200);
@@ -261,8 +220,13 @@ void setup() {
   the_mesh.applyGpsPrefs();
 #endif
 
-#ifdef DISPLAY_CLASS
-  ui_task.begin(disp, &sensors, the_mesh.getNodePrefs());  // still want to pass this in as dependency, as prefs might be moved
+#if defined(USE_W20_DECKPRO_SHELL)
+  w20_deckpro_shell_init();
+  w20_meshcore_ui_setup(&display, &sensors, the_mesh.getNodePrefs());
+#elif defined(DISPLAY_CLASS)
+  if (display.begin()) {
+    ui_task.begin(&display, &sensors, the_mesh.getNodePrefs());
+  }
 #endif
 
   board.onBootComplete();
@@ -272,24 +236,17 @@ void loop() {
   the_mesh.loop();
   interface_manager.loop();
   sensors.loop();
-#ifdef DISPLAY_CLASS
+
+#if defined(USE_W20_DECKPRO_SHELL)
+  w20_deckpro_shell_loop();
+#elif defined(DISPLAY_CLASS)
   ui_task.loop();
 #endif
-  rtc_clock.tick();
-#ifdef HAS_EXTERNAL_WATCHDOG
-  external_watchdog.loop();
-#endif
 
-  if (!the_mesh.hasPendingWork()) {
-#if defined(NRF52_PLATFORM)
-    board.sleep(0); // nrf ignores seconds param, sleeps whenever possible
-#endif
-  }
+  rtc_clock.tick();
 
 #if defined(ESP32) && defined(WIFI_SSID)
-  // Safely attempt to reconnect every 10 seconds if flagged
   if (wifi_needs_reconnect && (millis() - last_wifi_reconnect_attempt > 10000)) {
-    WIFI_DEBUG_PRINTLN("Attempting manual WiFi reconnect...");
     WiFi.disconnect();
     WiFi.reconnect();
     last_wifi_reconnect_attempt = millis();

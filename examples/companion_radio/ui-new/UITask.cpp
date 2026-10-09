@@ -747,6 +747,18 @@ void UITask::setCurrScreen(UIScreen* c) {
   _next_refresh = 100;
 }
 
+void UITask::injectKey(char c) {
+  if (c == 0 || !curr) return;
+  if (_display != NULL && !_display->isOn()) {
+    _display->turnOn();
+    _next_refresh = 100;
+    return;
+  }
+  curr->handleInput(c);
+  _auto_off = millis() + AUTO_OFF_MILLIS;
+  _next_refresh = 100;
+}
+
 /*
   hardware-agnostic pre-shutdown activity should be done here
 */

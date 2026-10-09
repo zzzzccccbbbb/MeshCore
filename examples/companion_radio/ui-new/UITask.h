@@ -74,6 +74,8 @@ public:
 
   void gotoHomeScreen() { setCurrScreen(home); }
   void showAlert(const char* text, int duration_millis);
+  /** Inject a UI key (KEY_NEXT / KEY_ENTER / …) from external input (e.g. CST3530). */
+  void injectKey(char c);
   int  getMsgCount() const { return _msgcount; }
   bool hasDisplay() const { return _display != NULL; }
   bool isButtonPressed() const;
