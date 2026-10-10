@@ -1,13 +1,8 @@
 /**
- * W20 Deck 调试日志：一模块一开关（默认全关）。
+ * W20 Deck 调试日志：一模块一开关，统一在本文件改 0/1。
  *
  * 信息/过程日志 → W20_<MOD>_LOG*；报错/失败仍用裸 Serial.printf，不要包进宏。
- *
- * build_flags 示例：
- *   -D W20_LOG_BAT=1
- *   -D W20_LOG_WIFI=1
- *   -D W20_LOG_UI=1
- *   -D W20_LOG_TOUCH=1
+ * 勿在 platformio.ini 用 -D W20_LOG_*=… 盖过本文件。
  */
 #pragma once
 
@@ -25,12 +20,11 @@
 #define W20_LOG_UI 0
 #endif
 
-/* 未单独指定时跟随 UI（触控/Setting 噪声大时可单独 -D=0/1） */
 #ifndef W20_LOG_TOUCH
-#define W20_LOG_TOUCH W20_LOG_UI
+#define W20_LOG_TOUCH 0
 #endif
 #ifndef W20_LOG_SETTING
-#define W20_LOG_SETTING W20_LOG_UI
+#define W20_LOG_SETTING 0
 #endif
 
 #ifndef W20_LOG_GPS

@@ -213,11 +213,12 @@ void ui_setting_set_gps_status(bool on)
     default_gps_status = on;
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
     if (on) {
-        const bool ok = w20_gps_mesh_reinit_after_module_power_on(300, 3000);
+        /* 短 settle即可；勿在 LVGL CLICKED 里堵数秒（松手会再进一次 toggle→又 OFF）。 */
+        const bool ok = w20_gps_mesh_reinit_after_module_power_on(80, 500);
         if (!ok) {
-            Serial.println("[GPS] power ON: Meshtastic GPS re-init FAILED");
+            Serial.println("[GPS] power ON: re-init FAILED");
         } else {
-            W20_GPS_LOGLN("[GPS] power ON: Meshtastic GPS re-init OK");
+            W20_GPS_LOGLN("[GPS] power ON: OK (rail/arbiter)");
         }
     } else {
         w20_gps_mesh_drop_on_module_power_off();

@@ -81,7 +81,18 @@ static volatile bool s_touch_hold_epd = false;
 /** 子菜单 push/pop 后：墨水未刷完前屏蔽 LVGL 点击，避免「逻辑已进页、屏仍旧页再点穿透」。 */
 static volatile bool s_epd_nav_touch_lock = false;
 static uint32_t s_epd_nav_touch_lock_ms = 0;
+/** nextPage 已结束（像素可见）；powerOff/hibernate 可能仍在进行，触控可先放行。 */
+static volatile bool s_epd_pixels_shown = false;
+/** prepare_subscreen 已 gen++，随后 render_start 勿再加，避免 worker gen 对不上卡死 busy。 */
+static volatile bool s_epd_nav_gen_primed = false;
 int disp_refr_mode = DISP_REFR_MODE_PART;
+
+static void w20_epd_mark_pixels_shown(void)
+{
+    s_epd_pixels_shown = true;
+    s_epd_nav_touch_lock = false;
+    ui_deckpro_menu_on_epd_pixels_ready();
+}
 
 static int s_menu_page_index = 0;
 
@@ -98,7 +109,8 @@ static uint32_t s_epd_worker_job_gen = 0;
 #endif
 
 static void w20_deckpro_epd_flush_if_pending(void);
-static void w20_deckpro_epd_do_flush(const uint8_t *bitmap, lv_coord_t w, lv_coord_t h, bool full, uint32_t *elapsed_ms);
+static void w20_deckpro_epd_do_flush(const uint8_t *bitmap, lv_coord_t w, lv_coord_t h, bool full, uint32_t *elapsed_ms,
+                                    uint32_t job_gen);
 static void w20_deckpro_epd_async_init(void);
 
 
@@ -150,6 +162,13 @@ void *w20_deckpro_shell_epd_gx_bw_ptr(void)
 bool w20_shell_mesh_screen_allowed(void)
 {
     return s_menu_page_index >= 1;
+}
+
+static bool s_suppress_menu_present_once = false;
+
+void w20_shell_suppress_menu_present_once(void)
+{
+    s_suppress_menu_present_once = true;
 }
 
 bool w20_shell_skip_mesh_idle_force(void)
@@ -386,7 +405,12 @@ void w20_shell_on_menu_page(int page_index)
         ui_deckpro_resume_aux_timers();
         ui_deckpro_refresh_taskbar_battery();
         ui_deckpro_refresh_taskbar_time();
-        w20_deckpro_present_menu_on_epd();
+        if (s_suppress_menu_present_once) {
+            s_suppress_menu_present_once = false;
+            W20_UI_LOG("on_menu_page 0 skip present_menu (handoff)");
+        } else {
+            w20_deckpro_present_menu_on_epd();
+        }
     }
 }
 
@@ -557,7 +581,7 @@ void w20_deckpro_sleep_prompt_flush(void)
 
     uint32_t elapsed = 0;
     w20_deckpro_epd_lock();
-    w20_deckpro_epd_do_flush(decodebuffer, LV_HOR_RES, LV_VER_RES, true, &elapsed);
+    w20_deckpro_epd_do_flush(decodebuffer, LV_HOR_RES, LV_VER_RES, true, &elapsed, s_epd_flush_gen);
     w20_deckpro_epd_unlock();
     s_epd_flush_done = true;
     s_epd_flush_pending = false;
@@ -567,7 +591,8 @@ void w20_deckpro_sleep_prompt_flush(void)
                (unsigned long)elapsed);
 }
 
-static void w20_deckpro_epd_do_flush(const uint8_t *bitmap, lv_coord_t w, lv_coord_t h, bool full, uint32_t *elapsed_ms)
+static void w20_deckpro_epd_do_flush(const uint8_t *bitmap, lv_coord_t w, lv_coord_t h, bool full, uint32_t *elapsed_ms,
+                                    uint32_t job_gen)
 {
     const uint32_t t0 = millis();
     if (full) {
@@ -580,6 +605,10 @@ static void w20_deckpro_epd_do_flush(const uint8_t *bitmap, lv_coord_t w, lv_coo
     do {
         deck_epd.drawInvertedBitmap(0, 0, bitmap, w, draw_h, GxEPD_BLACK);
     } while (deck_epd.nextPage());
+    /* 像素已上屏：先放行导航触控；随后 powerOff 可能再耗数百 ms。 */
+    if (job_gen == 0 || job_gen == s_epd_flush_gen) {
+        w20_epd_mark_pixels_shown();
+    }
     w20_deckpro_epd_after_refresh();
     if (elapsed_ms != nullptr) {
         *elapsed_ms = millis() - t0;
@@ -599,7 +628,7 @@ static void epd_flush_worker_task(void *param)
 
             w20_deckpro_epd_lock();
             if (s_epd_flush_snapshot != nullptr) {
-                w20_deckpro_epd_do_flush(s_epd_flush_snapshot, LV_HOR_RES, LV_VER_RES, full, &elapsed);
+                w20_deckpro_epd_do_flush(s_epd_flush_snapshot, LV_HOR_RES, LV_VER_RES, full, &elapsed, job_gen);
             }
             w20_deckpro_epd_unlock();
 
@@ -619,14 +648,20 @@ static void epd_flush_worker_task(void *param)
             }
             if (job_gen == s_epd_flush_gen) {
                 s_epd_flush_done = true;
-                s_epd_nav_touch_lock = false;
+                w20_epd_mark_pixels_shown();
+            } else if (!s_epd_flush_pending) {
+                /* 旧 job 被 prepare gen++ 作废：用当前 buffer 再刷一帧，避免 flush_done 永不置位 */
+                W20_UI_LOG("epd_flush gen mismatch job=%lu cur=%lu -> retry", (unsigned long)job_gen,
+                           (unsigned long)s_epd_flush_gen);
+                s_epd_flush_pending = true;
             }
 
             if (!s_epd_flush_pending) {
                 break;
             }
             s_epd_flush_pending = false;
-            s_epd_job_full = (disp_refr_mode == DISP_REFR_MODE_FULL);
+            /* mismatch 重试时若像素未上屏，强制 FULL，避免只 PART 半页 */
+            s_epd_job_full = !s_epd_pixels_shown || (disp_refr_mode == DISP_REFR_MODE_FULL);
             s_epd_worker_job_gen = s_epd_flush_gen;
             if (decodebuffer != nullptr && s_epd_flush_snapshot != nullptr && s_epd_flush_snapshot_bytes > 0) {
                 memcpy(s_epd_flush_snapshot, decodebuffer, s_epd_flush_snapshot_bytes);
@@ -662,8 +697,12 @@ static void w20_deckpro_epd_flush_if_pending(void)
     if (w20_wifi_ota_is_busy()) {
         return;
     }
-    if (s_epd_flush_suppressed || s_touch_hold_epd) {
+    if (s_epd_flush_suppressed) {
         s_epd_flush_pending = false;
+        return;
+    }
+    /* 按住时推迟启动，但保留 pending（勿清掉，否则导航 FULL 会丢、busy 卡死） */
+    if (s_touch_hold_epd) {
         return;
     }
     if (!s_epd_flush_pending) {
@@ -683,7 +722,7 @@ static void w20_deckpro_epd_flush_if_pending(void)
     if (s_epd_worker_task == nullptr || s_epd_flush_snapshot == nullptr) {
         w20_deckpro_epd_lock();
         uint32_t elapsed = 0;
-        w20_deckpro_epd_do_flush(decodebuffer, w, h, full, &elapsed);
+        w20_deckpro_epd_do_flush(decodebuffer, w, h, full, &elapsed, job_gen);
         w20_deckpro_epd_unlock();
         W20_UI_LOG("epd_flush %s %dx%d %lums epd_end=%s async=0", full ? "FULL" : "PART", (int)w, (int)h,
                    (unsigned long)elapsed,
@@ -698,7 +737,7 @@ static void w20_deckpro_epd_flush_if_pending(void)
         }
         if (job_gen == s_epd_flush_gen) {
             s_epd_flush_done = true;
-            s_epd_nav_touch_lock = false;
+            w20_epd_mark_pixels_shown();
         }
         return;
     }
@@ -713,7 +752,7 @@ static void w20_deckpro_epd_flush_if_pending(void)
 #else
     w20_deckpro_epd_lock();
     uint32_t elapsed = 0;
-    w20_deckpro_epd_do_flush(decodebuffer, w, h, full, &elapsed);
+    w20_deckpro_epd_do_flush(decodebuffer, w, h, full, &elapsed, job_gen);
     w20_deckpro_epd_unlock();
 
     W20_UI_LOG("epd_flush %s %dx%d %lums epd_end=%s", full ? "FULL" : "PART", (int)w, (int)h,
@@ -730,7 +769,7 @@ static void w20_deckpro_epd_flush_if_pending(void)
     }
     if (job_gen == s_epd_flush_gen) {
         s_epd_flush_done = true;
-        s_epd_nav_touch_lock = false;
+        w20_epd_mark_pixels_shown();
     }
 #endif
 }
@@ -759,10 +798,9 @@ static void dips_render_start_cb(lv_disp_drv_t *disp_drv)
     if (s_epd_flush_suppressed) {
         return;
     }
-    /* 触摸未抬起：只让 LVGL 画到 buffer，不启动墨水 flush（导航/开关都等抬手后再刷一次）。 */
+    /* 触摸未抬起：只画 buffer；保留已排队的导航 FULL pending。 */
     if (s_touch_hold_epd) {
         factory_pause_flush_timer();
-        s_epd_flush_pending = false;
         return;
     }
     if (s_menu_present_active) {
@@ -772,8 +810,13 @@ static void dips_render_start_cb(lv_disp_drv_t *disp_drv)
         }
     }
     s_epd_flush_done = false;
+    s_epd_pixels_shown = false;
     s_epd_flush_pending = false;
-    s_epd_flush_gen++;
+    if (s_epd_nav_gen_primed) {
+        s_epd_nav_gen_primed = false;
+    } else {
+        s_epd_flush_gen++;
+    }
     static uint32_t s_render_seq = 0;
     s_render_seq++;
     W20_UI_LOG("lv_render_start #%lu full_refresh=1", (unsigned long)s_render_seq);
@@ -833,8 +876,8 @@ static void disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_
 }
 
 #ifndef W20_EPD_NAV_TOUCH_LOCK_MAX_MS
-/** 导航触控锁上限：须 ≥ FULL 刷墨（约 1.3s）；超时兜底，避免异常卡死触摸。 */
-#define W20_EPD_NAV_TOUCH_LOCK_MAX_MS 2500u
+/** 导航触控锁上限：像素上屏优先解锁；此值为异常兜底（FULL≈1.3s）。 */
+#define W20_EPD_NAV_TOUCH_LOCK_MAX_MS 1600u
 #endif
 
 static bool w20_epd_nav_touch_lock_active(void)
@@ -842,8 +885,8 @@ static bool w20_epd_nav_touch_lock_active(void)
     if (!s_epd_nav_touch_lock) {
         return false;
     }
-    /* 本帧 FULL 已刷完则解锁（worker / sync flush 置 flush_done） */
-    if (s_epd_flush_done && !s_epd_flush_pending) {
+    /* 像素已上屏即可操作（不必等 powerOff）；整帧 flush_done 同样解锁 */
+    if (s_epd_pixels_shown || (s_epd_flush_done && !s_epd_flush_pending)) {
         s_epd_nav_touch_lock = false;
         return false;
     }
@@ -905,7 +948,10 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
         s_log_down = true;
         s_touch_hold_epd = true;
         factory_pause_flush_timer();
-        s_epd_flush_pending = false;
+        /* 仅空闲时取消 PART 按下态排队；导航/未完成 FULL 勿清 pending（否则 busy 卡死） */
+        if (s_epd_flush_done && !s_epd_nav_touch_lock) {
+            s_epd_flush_pending = false;
+        }
         W20_TOUCH_LOG("touch DOWN raw(%d,%d) lv(%d,%d) flip_y=%d\n", (int)last_x, (int)last_y, (int)data->point.x, (int)data->point.y,
                    W20_DECKPRO_FLIP_Y);
     } else if (!touched && s_log_down) {
@@ -1029,6 +1075,7 @@ bool ui_deckpro_epd_nav_touch_locked(void)
 
 bool ui_deckpro_epd_flush_busy(void)
 {
+    /* 叠刷门闩仍等整帧（含 powerOff）；触控放行见 s_epd_pixels_shown / nav_touch_lock */
     return s_epd_flush_pending || !s_epd_flush_done;
 }
 
@@ -1036,11 +1083,13 @@ void ui_deckpro_epd_prepare_subscreen(void)
 {
     factory_pause_flush_timer();
     s_epd_flush_pending = false;
-    /* 作废按下期间可能已排队/在途的旧页 PART，只保留随后这一次 FULL */
+    /* 作废在途旧帧；标记 primed，避免紧接的 render_start 再 gen++ */
     s_epd_flush_gen++;
+    s_epd_nav_gen_primed = true;
     s_epd_flush_done = false;
+    s_epd_pixels_shown = false;
     s_touch_hold_epd = false;
-    /* 导航后锁触摸至本帧 FULL 刷完；停墨时不锁（否则永远解不开） */
+    /* 导航后锁触摸至像素上屏；停墨时不锁（否则永远解不开） */
     if (!s_epd_flush_suppressed) {
         s_epd_nav_touch_lock = true;
         s_epd_nav_touch_lock_ms = millis();
@@ -1056,6 +1105,11 @@ void ui_deckpro_epd_prepare_subscreen(void)
         lv_obj_invalidate(scr);
     }
     disp_full_refr();
+}
+
+bool ui_deckpro_epd_pixels_ready(void)
+{
+    return s_epd_pixels_shown;
 }
 
 void factory_epd_hibernate(void)
@@ -1222,6 +1276,7 @@ bool w20_shell_mesh_screen_allowed(void)
     return true;
 }
 void w20_shell_on_menu_page(int) {}
+void w20_shell_suppress_menu_present_once(void) {}
 void w20_deckpro_shell_init(void) {}
 void w20_deckpro_shell_loop(void) {}
 void w20_deckpro_early_splash(void) {}

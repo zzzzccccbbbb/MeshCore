@@ -36,11 +36,12 @@ void ui_deckpro_enter_board_sleep(void);
 #endif
 
 #define SETTING_PAGE_MAX_ITEM 7
-/** Setting：行间缝收紧、按键加高；CLICK_EXT 随 PAD_ROW 联动。 */
+/** Setting：布局不变；仅 CLICK_EXT 调命中（RGB 小、About 大，避免互抢）。 */
 #define SETTING_ITEM_BTN_H    40
 #define SETTING_ITEM_PAD_ROW  8
 #define SETTING_ITEM_PAD_TOP  14
-#define SETTING_ITEM_CLICK_EXT ((SETTING_ITEM_PAD_ROW + 1) / 2)
+#define SETTING_ITEM_CLICK_EXT 2
+#define SETTING_SUB_CLICK_EXT 12
 /** Test：沿用旧布局（行高 35、行间距 8），与 Setting 解耦。 */
 #define TEST_ITEM_BTN_H       35
 #define TEST_ITEM_PAD_ROW     8
@@ -90,10 +91,13 @@ static lv_obj_t *scr_back_btn_create(lv_obj_t *parent, const char *text, lv_even
     lv_obj_set_style_bg_color(btn, DECKPRO_COLOR_BG, LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_set_style_outline_width(btn, 0, LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN | LV_STATE_PRESSED);
-#endif
-    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+    /* 仅加大触控热区，不改可视尺寸/列表布局 */
+    lv_obj_set_ext_click_area(btn, 12);
+#else
     /* 勿过大：会与下方第一列表项重叠（WIFI Scan 曾被当成返回） */
     lv_obj_set_ext_click_area(btn, 6);
+#endif
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *label2 = lv_label_create(btn);
     lv_obj_align(label2, LV_ALIGN_LEFT_MID, 0, 0);
@@ -107,7 +111,11 @@ static lv_obj_t *scr_back_btn_create(lv_obj_t *parent, const char *text, lv_even
     lv_label_set_text(label, text);
     lv_obj_add_flag(label, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(label, cb, LV_EVENT_CLICKED, NULL);
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+    lv_obj_set_ext_click_area(label, 14);
+#else
     lv_obj_set_ext_click_area(label, 8);
+#endif
 
     return label;
 }
@@ -244,6 +252,16 @@ static struct menu_btn menu_btn_list[] =
     {SCREEN9_ID,  &img_lora,    "Shutdown", 167,    189},
     /* 2026-09-21: 删除原第 10 项 PCM5102（pos 与 Lora 重叠；page_num=0 后不再有第二页展示）。 */
 };
+
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+/** 保留空实现：回主菜单误点已由 nav_touch_lock（像素上屏前）覆盖，无需再挡九宫格。 */
+void ui_deckpro_menu_arm_click_suppress(uint32_t ms)
+{
+    (void)ms;
+}
+
+void ui_deckpro_menu_on_epd_pixels_ready(void) {}
+#endif
 
 static void menu_btn_event_cb(lv_event_t *e)
 {
@@ -1057,8 +1075,22 @@ static void setting_scr_event(lv_event_t *e)
 {
     lv_obj_t *tgt = (lv_obj_t *)e->target;
     ui_setting_handle *h = (ui_setting_handle *)e->user_data;
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+    static uint32_t s_setting_click_guard_ms = 0;
+#endif
 
     if(e->code == LV_EVENT_CLICKED) {
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+        /* 开关/RGB 处理含短 delay 或全刷：抑制松手二次 CLICKED */
+        if (h->type == UI_SETTING_TYPE_SW || h->type == UI_SETTING_TYPE_RGB) {
+            const uint32_t now = millis();
+            if (now - s_setting_click_guard_ms < 450) {
+                W20_SETTING_LOG("setting click debounce idx=%d type=%d", (int)(h - setting_handle_list), (int)h->type);
+                return;
+            }
+            s_setting_click_guard_ms = now;
+        }
+#endif
         switch (h->type)
         {
         case UI_SETTING_TYPE_SW:
@@ -1100,6 +1132,7 @@ static void setting_scr_event(lv_event_t *e)
             break;
         }
         case UI_SETTING_TYPE_SUB:
+            W20_SETTING_LOG("setting SUB click idx=%d sub=%d", (int)(h - setting_handle_list), (int)h->sub_id);
             scr_push_subscreen(h->sub_id);
             break;
         default:
@@ -1141,7 +1174,9 @@ static void setting_item_create(int curr_apge)
             break;
         }
 
-        // style：高度 35，文字在框内垂直居中；触控区域与可视高度一致并覆盖行间距
+        // style：可视高度不变；About(SUB) 仅加大 CLICK_EXT
+        const lv_coord_t click_ext =
+            (h->type == UI_SETTING_TYPE_SUB) ? SETTING_SUB_CLICK_EXT : SETTING_ITEM_CLICK_EXT;
         lv_obj_set_height(h->obj, SETTING_ITEM_BTN_H);
         lv_obj_set_style_min_height(h->obj, SETTING_ITEM_BTN_H, LV_PART_MAIN);
         lv_obj_set_style_max_height(h->obj, SETTING_ITEM_BTN_H, LV_PART_MAIN);
@@ -1161,7 +1196,7 @@ static void setting_item_create(int curr_apge)
         lv_obj_set_flex_align(h->obj, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_add_flag(h->obj, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_clear_flag(h->obj, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_ext_click_area(h->obj, SETTING_ITEM_CLICK_EXT);
+        lv_obj_set_ext_click_area(h->obj, click_ext);
         /* list_btn 内主标题 label 也垂直居中；子控件不抢触控 */
         for (uint32_t ci = 0; ci < lv_obj_get_child_cnt(h->obj); ci++) {
             lv_obj_t *ch = lv_obj_get_child(h->obj, ci);
@@ -5144,6 +5179,17 @@ extern "C" void ui_deckpro_poll_boot_shutdown(void)
     }
 
     s_boot_prev_raw = raw;
+}
+
+extern "C" void ui_deckpro_request_shutdown_from_mesh(void)
+{
+    s_shutdown_low_batt_hint = false;
+    if (w20_shell_mesh_screen_allowed()) {
+        w20_shell_suppress_menu_present_once();
+        ui_deckpro_exit_mesh();
+    }
+    W20_UI_LOG("mesh hibernate long -> SCREEN9 shutdown");
+    scr_push_subscreen(SCREEN9_ID);
 }
 
 extern "C" void ui_deckpro_poll_low_batt_shutdown(void)

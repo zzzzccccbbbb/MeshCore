@@ -39,6 +39,7 @@
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
 #include "platform/w20_deckpro/w20_power_battery.h"
 #include "platform/w20_deckpro/ui_deckpro_port.h"
+extern "C" void ui_deckpro_request_shutdown_from_mesh(void);
 /** 与 ui_deckpro MESH_BACK_BTN_* 热区对应；顶边贴齐屏顶（与触控热区一致）。 */
 #ifndef MESH_BACK_HINT_W
 #define MESH_BACK_HINT_W 16
@@ -624,7 +625,12 @@ public:
 #endif
 #ifndef UI_NO_HIBERNATE
     if (c == KEY_ENTER && _page == HomePage::SHUTDOWN) {
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+      /* W20：长按进 Deck SCREEN9 logo 关机，不再停在 Mesh hibernating */
+      ui_deckpro_request_shutdown_from_mesh();
+#else
       _shutdown_init = true;  // need to wait for button to be released
+#endif
       return true;
     }
 #endif

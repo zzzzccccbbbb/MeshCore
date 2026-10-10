@@ -108,7 +108,15 @@ bool w20_gps_hw_ok(void)
     if (peri_init_st[E_PERI_GPS])
         return true;
 #if MESHTASTIC_EXCLUDE_GPS
-    return false;
+    /* MeshCore：无 Meshtastic GPS 对象。Test PASS 跟 Setting Power GPS + EN 轨一致（同 LoRa 跟 isReady）。 */
+    if (!ui_setting_get_gps_status()) {
+        return false;
+    }
+#if (BOARD_GPS_EN >= 0)
+    return digitalRead(BOARD_GPS_EN) == HIGH;
+#else
+    return true;
+#endif
 #else
     return gps != nullptr;
 #endif
@@ -303,6 +311,16 @@ bool w20_gps_mesh_reinit_after_module_power_on(uint32_t settle_ms, uint32_t time
     w20_mesh_gps_destroy();
     s_mesh_gps_handed_off = false;
     s_target = GPS_OWNER_MESH;
+
+#if MESHTASTIC_EXCLUDE_GPS || !HAS_GPS
+    /* MeshCore：无 Meshtastic GPS 对象；上电只恢复轨/仲裁，进 GPS 页再 request_deck。
+     * 旧逻辑等 gps!=nullptr 必超时 ~3s，阻塞 Setting 点击且常被第二次 CLICKED 又关掉。 */
+    (void)timeout_ms;
+    s_current = GPS_OWNER_MESH;
+    s_state = GPS_ARB_IDLE;
+    LOG_INFO("W20: GPS module power ON (rail only, MeshCore)");
+    return true;
+#else
     s_state = GPS_INIT_MESH;
 
     const uint32_t t0 = millis();
@@ -317,6 +335,7 @@ bool w20_gps_mesh_reinit_after_module_power_on(uint32_t settle_ms, uint32_t time
 
     LOG_WARN("W20: Meshtastic GPS re-init failed after module power ON");
     return gps != nullptr;
+#endif
 }
 
 #endif

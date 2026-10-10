@@ -156,6 +156,10 @@ void ui_deckpro_poll_gesture(void);
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
 /** Mesh→菜单 FULL 刷前：复位滚动/布局，避免首帧偏移。 */
 void ui_deckpro_menu_prepare_for_epd(void);
+/** 兼容旧调用；误点防护交给 nav_touch_lock，此处为空操作。 */
+void ui_deckpro_menu_arm_click_suppress(uint32_t ms);
+/** 兼容旧调用；像素上屏通知，当前为空操作。 */
+void ui_deckpro_menu_on_epd_pixels_ready(void);
 /** 水平滑动手势进行中不向 LVGL 上报按下，避免拖动九宫格。 */
 bool ui_deckpro_lvgl_touch_suppressed(void);
 /** 离开主菜单时清零滑动手势状态。 */
@@ -170,6 +174,8 @@ void ui_deckpro_epd_nav_hold(bool hold);
 bool ui_deckpro_epd_nav_hold_active(void);
 /** 子菜单 FULL 刷未完成：true 时 LVGL 点击会被吞，应排队导航。 */
 bool ui_deckpro_epd_nav_touch_locked(void);
+/** nextPage 已结束、像素可见（powerOff 可能仍在进行）。 */
+bool ui_deckpro_epd_pixels_ready(void);
 /** EPD 正在刷墨（pending 或尚未 done）：关机页等可见后再倒计时。 */
 bool ui_deckpro_epd_flush_busy(void);
 /** 主菜单 taskbar 电量图标/百分比立即刷新（IP5356）。 */
@@ -188,6 +194,8 @@ void ui_deckpro_exit_mesh(void);
 void ui_deckpro_mesh_swipe_back(void);
 /** 主菜单九宫格根屏：轮询 Boot 长按进入 Shutdown（SCREEN9）。 */
 void ui_deckpro_poll_boot_shutdown(void);
+/** Mesh 关机档长按：退出 Mesh 并进 SCREEN9（与九宫格 Shutdown / Boot 长按同页）。 */
+void ui_deckpro_request_shutdown_from_mesh(void);
 /** 低电自动关机：进 SCREEN9（img_start + 底部 Low battery off），再 hold 后真关机。 */
 void ui_deckpro_poll_low_batt_shutdown(void);
 /** Deck 占屏时吞掉 Meshtastic 对 Boot 的短/长按/关机，避免刷出 Mesh「Shutting Down...」。 */

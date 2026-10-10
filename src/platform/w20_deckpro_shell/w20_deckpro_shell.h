@@ -11,6 +11,8 @@ bool w20_shell_mesh_screen_allowed(void);
 
 /** Main menu page index from Deck Pro UI: 0 = home grid, 1 = second page (Meshtastic UI). */
 void w20_shell_on_menu_page(int page_index);
+/** 下一次 on_menu_page(0) 不刷九宫格（Mesh 直接交接 SCREEN9 等，避免叠刷）。 */
+void w20_shell_suppress_menu_present_once(void);
 
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
 /** 进 Mesh 切换期间为 true：跳过 runOnce 里 FIXED 时的 forceDisplay（on_menu_page 已 forceDisplay(true)）。 */

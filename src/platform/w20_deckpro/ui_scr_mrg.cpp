@@ -3,6 +3,7 @@
 
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
 #include "w20_dbg_log.h"
+#include "ui_deckpro.h"
 #endif
 
 /* 记录所有的屏幕卡片 */ 

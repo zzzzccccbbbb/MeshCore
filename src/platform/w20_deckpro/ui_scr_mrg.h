@@ -63,6 +63,8 @@ void ui_deckpro_epd_nav_hold(bool hold);
 bool ui_deckpro_epd_nav_hold_active(void);
 /** 子菜单导航 FULL 刷未完成时为 true（LVGL 点击会被吞）。 */
 bool ui_deckpro_epd_nav_touch_locked(void);
+/** nextPage 已结束、像素可见（powerOff 可能仍在进行）。 */
+bool ui_deckpro_epd_pixels_ready(void);
 /** EPD 正在刷墨：关机页等画面落地后再 hold。 */
 bool ui_deckpro_epd_flush_busy(void);
 #endif

@@ -12,13 +12,13 @@ void w20_gps_arbiter_tick(void);
 bool w20_mesh_gps_try_init(void);
 void w20_mesh_gps_shutdown(void);
 
-/** Test 页只读：Deck gps_init 或 Meshtastic gps 曾初始化成功即 PASS，不抢 GPS。 */
+/** Test 页只读：Deck init / Meshtastic gps /（MeshCore）Setting 电源轨 ON 即 PASS，不抢 GPS。 */
 bool w20_gps_hw_ok(void);
 
 /** Setting 关 Power GPS：释放 Deck/Mesh GPS 驱动（delete gps）。 */
 void w20_gps_mesh_drop_on_module_power_off(void);
 
-/** Setting 开 Power GPS：模组上电后强制 Meshtastic 重新 createGps（超时 ms 内 tick）。 */
+/** Setting 开 Power GPS：模组上电后恢复驱动。MeshCore（无 Meshtastic GPS）仅轨+仲裁；否则 createGps。 */
 bool w20_gps_mesh_reinit_after_module_power_on(uint32_t settle_ms, uint32_t timeout_ms);
 
 #endif
