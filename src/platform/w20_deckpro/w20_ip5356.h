@@ -10,8 +10,8 @@ extern IP5356 g_ip5356;
 /**
  * 探测结果：
  * - boot 尝试一次；失败记 SKIPPED
- * - 运行期仅由 GPIO10 KEY 边沿/慢周期经 try_runtime_reprobe 再 begin
- * - Battery/Test 等读路径禁止 begin（ensure_ready 为空）
+ * - SKIPPED（开机未找到或运行掉电）后每 BUS_RECOVER_MS 轻探 ACK，插电后尽快 begin
+ * - KEY 边沿/周期 try_runtime_reprobe 作备份；Battery/Test 读路径禁止 begin
  */
 enum w20_ip5356_probe_state_t {
     W20_IP5356_PROBE_NOT_TRIED = 0,

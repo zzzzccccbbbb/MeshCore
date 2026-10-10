@@ -7,7 +7,7 @@
  */
 #pragma once
 
-#define UI_T_DECK_PRO_VERSION    "v1.3-261010B"  // Software version
+#define UI_T_DECK_PRO_VERSION    "v1.3-261010C"  // Software version
 #define BOARD_T_DECK_PRO_VERSION "v2.0-260812"  // Hardware version
 
 // Serial
@@ -60,9 +60,11 @@
 /**
  * UI% 策略（默认 CW，IP 仅校准）：
  * - 主源始终 CW2217：先线性拉伸（FULL_RAW），再加 IP 学到的 bias（见 W20_BAT_SOC_ALIGN）
- * - IP 在线且非 KEY 休眠、非大电流：EMA 学习 bias≈IP%−CW拉伸%
- * - IP 休眠/读失败：停止学习，保留上次 bias（近满偏低仍靠 bias 抬）
- * - CW 见底 / VBAT 过低：清掉正 bias，避免 UI 卡在 bias_max（如 25%）
+ * - IP 在线且非 KEY 休眠、非大电流、非充电：分阶段学 bias≈IP%−CW拉伸%（分歧大则更慢）
+ * - 充电（VBUS/charging）：停学 IP；忽略负 bias；UI 棘轮只升不降，等 CW 超过显示再升
+ * - |IP−CW| 或 |V_IP−V_CW| 过大：不猛靠，缓靠；IP 离线时 bias 缓衰回 0（跟回 CW）
+ * - 静载 VBAT（无快充/快放、非 VBUS、大电流后已回弹）：LUT% 作阶段性软参考，慢纠 bias
+ * - CW 见底 / VBAT 过低：清掉正 bias，避免 UI 卡在 bias_max
  * - CW 故障才电压 LUT；插电封顶 99；对号 = Finish +（拉伸+bias 后）UI≥FINISH_ICON_MIN
  */
 /** 1=UI% 直接跟 IP5356（旧试跑）；0=跟 CW+IP 校准（推荐默认）。 */
@@ -103,6 +105,13 @@
 #endif
 #ifndef W20_BAT_SOC_SLEW_PCT_PER_S
 #define W20_BAT_SOC_SLEW_PCT_PER_S 1
+#endif
+/**
+ * 充电棘轮：VBUS/charging 时 UI 禁止因对齐/负 bias 下降；
+ * 仅当估计值超过当前显示才上升（避免插电后跟偏低 IP% 往下掉）。
+ */
+#ifndef W20_BAT_SOC_CHG_RATCHET
+#define W20_BAT_SOC_CHG_RATCHET 1
 #endif
 /** 近满数字滞回：非充电时进入 100 的阈值 / 退出下限。 */
 #ifndef W20_BAT_SOC_FULL_ENTER
@@ -169,21 +178,80 @@
 #endif
 
 /**
- * IP→CW 校准：轻载学 bias（EMA），UI = clamp(CW拉伸 + bias)。
- * IP 休眠后保留 bias；CW≤EMPTY 或 V≤EMPTY_MV 时清正 bias，允许 UI 落到 0。
+ * IP→CW 校准：轻载分阶段学 bias，UI = clamp(CW拉伸 + bias)。
+ * 分歧大时慢靠；IP 离线 bias 缓衰；CW≤EMPTY 或 V≤EMPTY_MV 时清正 bias。
  */
 #ifndef W20_BAT_SOC_ALIGN
 #define W20_BAT_SOC_ALIGN 1
 #endif
+/** 小分歧（|IP−CW|＜MID）时 EMA 分母；越大越慢。 */
 #ifndef W20_BAT_SOC_ALIGN_EMA_DIV
 #define W20_BAT_SOC_ALIGN_EMA_DIV 8
 #endif
-/** |bias| 上限（百分点）；需能盖住「CW 拉伸后仍比 IP 低十几～二十点」。 */
+/** |IP−CW|≥ 此值：中分歧，更慢 EMA。 */
+#ifndef W20_BAT_SOC_ALIGN_GAP_MID
+#define W20_BAT_SOC_ALIGN_GAP_MID 10
+#endif
+#ifndef W20_BAT_SOC_ALIGN_EMA_DIV_MID
+#define W20_BAT_SOC_ALIGN_EMA_DIV_MID 16
+#endif
+/** |IP−CW|≥ 此值：大分歧，极慢靠，且每步最多 ±1。 */
+#ifndef W20_BAT_SOC_ALIGN_GAP_LARGE
+#define W20_BAT_SOC_ALIGN_GAP_LARGE 18
+#endif
+#ifndef W20_BAT_SOC_ALIGN_EMA_DIV_LARGE
+#define W20_BAT_SOC_ALIGN_EMA_DIV_LARGE 32
+#endif
+/** |V_IP−V_CW|≥ 此 mV：至少按中分歧处理（电压对不上不猛信 IP%）。 */
+#ifndef W20_BAT_SOC_ALIGN_V_DISAGREE_MV
+#define W20_BAT_SOC_ALIGN_V_DISAGREE_MV 80
+#endif
+/** |bias| 上限；大分歧时也不一次钉死到 IP。 */
 #ifndef W20_BAT_SOC_ALIGN_BIAS_MAX
-#define W20_BAT_SOC_ALIGN_BIAS_MAX 25
+#define W20_BAT_SOC_ALIGN_BIAS_MAX 18
 #endif
 #ifndef W20_BAT_SOC_ALIGN_LEARN_MS
 #define W20_BAT_SOC_ALIGN_LEARN_MS 2000u
+#endif
+/** 大分歧时两次学习最短间隔（比 LEARN_MS 更长）。 */
+#ifndef W20_BAT_SOC_ALIGN_LEARN_MS_LARGE
+#define W20_BAT_SOC_ALIGN_LEARN_MS_LARGE 5000u
+#endif
+/** IP 离线后 bias 向 0 衰减间隔（跟回 CW，避免钉在 -25 假低电）。 */
+#ifndef W20_BAT_SOC_ALIGN_DECAY_MS
+#define W20_BAT_SOC_ALIGN_DECAY_MS 4000u
+#endif
+/**
+ * 静载 VBAT 软参考：仅 |ibat| 小、非 VBUS、大电流结束后已 settle 时，
+ * 用轻载 LUT(VBAT) 作阶段性纠正（不替代 CW/IP，只慢拉偏大的 UI）。
+ */
+#ifndef W20_BAT_SOC_ALIGN_VBAT_REF
+#define W20_BAT_SOC_ALIGN_VBAT_REF 1
+#endif
+/** |ibat|＜此值才算静载候选（mA）；快充/快放下 OCV 无参考性。 */
+#ifndef W20_BAT_SOC_ALIGN_QUIET_IBAT_MA
+#define W20_BAT_SOC_ALIGN_QUIET_IBAT_MA 250
+#endif
+/** 连续静载满此时长才采信 VBAT（ms）。 */
+#ifndef W20_BAT_SOC_ALIGN_QUIET_HOLD_MS
+#define W20_BAT_SOC_ALIGN_QUIET_HOLD_MS 8000u
+#endif
+/** 离开大电流后再等此时长，电压回弹后再信 VBAT（ms）。 */
+#ifndef W20_BAT_SOC_ALIGN_HEAVY_SETTLE_MS
+#define W20_BAT_SOC_ALIGN_HEAVY_SETTLE_MS 15000u
+#endif
+/** |UI−Vref|≥ 此百分点才纠（小误差不碰，避免抖）。 */
+#ifndef W20_BAT_SOC_ALIGN_VBAT_GAP_MIN
+#define W20_BAT_SOC_ALIGN_VBAT_GAP_MIN 8
+#endif
+#ifndef W20_BAT_SOC_ALIGN_VBAT_LEARN_MS
+#define W20_BAT_SOC_ALIGN_VBAT_LEARN_MS 5000u
+#endif
+#ifndef W20_BAT_SOC_ALIGN_VBAT_EMA_DIV
+#define W20_BAT_SOC_ALIGN_VBAT_EMA_DIV 24
+#endif
+#ifndef W20_BAT_SOC_ALIGN_VBAT_MAX_STEP
+#define W20_BAT_SOC_ALIGN_VBAT_MAX_STEP 1
 #endif
 /** CW 拉伸% ≤ 此值视为见底：不学正 bias，且 apply 时正 bias 贡献为 0。 */
 #ifndef W20_BAT_SOC_ALIGN_EMPTY_CW_PCT
@@ -249,11 +317,21 @@
 #define W20_IP5356_REPROBE_MIN_MS 5000u
 #endif
 /**
- * KEY 保持高（外部供电/芯片醒着）且仍 SKIPPED 时的慢速兜底重探间隔。
- * 覆盖「开机 KEY 已高、无上升沿」或「模块后上电但边沿被滤掉」。
+ * KEY 保持高且仍 SKIPPED 时的兜底重探间隔（轻探失败时的备份；主路径见 BUS_RECOVER_MS）。
  */
 #ifndef W20_IP5356_REPROBE_PERIODIC_MS
-#define W20_IP5356_REPROBE_PERIODIC_MS 30000u
+#define W20_IP5356_REPROBE_PERIODIC_MS 8000u
+#endif
+/**
+ * IP5356 硬件掉电时 I2C NACK 为预期：连续读失败达此次数 → 标 SKIPPED，停止轮询（消 Wire Error 刷屏）。
+ * 插电后由 BUS_RECOVER_MS 轻探 / KEY 周期重探恢复。
+ */
+#ifndef W20_IP5356_BUS_FAIL_STREAK
+#define W20_IP5356_BUS_FAIL_STREAK 3u
+#endif
+/** SKIPPED（开机未找到或运行掉电）后轻量 ACK 探测间隔；插电应在此量级内恢复充电态。 */
+#ifndef W20_IP5356_BUS_RECOVER_MS
+#define W20_IP5356_BUS_RECOVER_MS 1500u
 #endif
 /** GPIO10 KEY 心跳间隔（需 W20_LOG_BAT）。 */
 #ifndef W20_IP5356_KEY_HB_MS
