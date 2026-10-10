@@ -1,7 +1,19 @@
 #include <Arduino.h>
 #include "target.h"
+#if defined(W20_MESHNOLOGY)
+#include "platform/w20_deckpro/ui_deckpro_port.h"
+#endif
 
 MeshnologyW20Board board;
+
+bool MeshnologyW20Board::isExternalPowered()
+{
+#if defined(W20_MESHNOLOGY)
+  return ui_battery_vbus_in() || ui_battery_charging();
+#else
+  return false;
+#endif
+}
 
 W20SemtechRadio radio_driver(board);
 

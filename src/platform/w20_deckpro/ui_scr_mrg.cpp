@@ -229,6 +229,14 @@ int scr_mgr_top_id(void)
     return scr_stack_top ? scr_stack_top->id : -1;
 }
 
+int scr_mgr_prev_id(void)
+{
+    if (scr_stack_top == NULL || scr_stack_top->prev == NULL) {
+        return -1;
+    }
+    return scr_stack_top->prev->id;
+}
+
 bool scr_mgr_is_root_top(void)
 {
     return scr_stack_top != NULL && scr_stack_top == scr_stack_root;

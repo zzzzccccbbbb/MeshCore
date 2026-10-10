@@ -8,6 +8,7 @@
 #include "w20_dbg_log.h"
 #include "peripheral.h"
 #include "peri_power.h"
+#include "peri_lighting_led_key.h"
 #include "ebook_catalog.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -149,8 +150,13 @@ static const char *line_full_format(int max_c, const char *str1, const char *str
 
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
 /** 右列 GPS/Battery/Shutdown：仅触控区相对图标偏移（显示位置不变） */
+/** 右列命中相对图标的微调（触摸坐标系统性偏时改这里）。 */
 #define MENU_BTN_RIGHT_HIT_OFS_X 0
 #define MENU_BTN_RIGHT_HIT_OFS_Y 0
+/** 图标 50×50；命中加高盖住下方文字，ext 吃掉擦边（行距 38 / 列距 22，ext≤10 不重叠）。 */
+#define MENU_BTN_HIT_W           50
+#define MENU_BTN_HIT_H           66
+#define MENU_BTN_CLICK_EXT       10
 #endif
 
 static ui_indev_read_cb ui_get_gesture_dir = NULL;
@@ -183,6 +189,9 @@ static void scr_push_subscreen(int id)
 /** WiFi 子菜单 push：抬手后仍 hold 墨水，直接刷子页，避免先 PART 父列表。 */
 static void scr_push_wifi_subscreen(int id)
 {
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+    ui_wifi_menu_session_begin();
+#endif
     ui_deckpro_pause_aux_timers();
     ui_deckpro_epd_nav_hold(true);
     factory_pause_flush_timer();
@@ -347,25 +356,24 @@ static void menu_btn_create(lv_obj_t *parent, struct menu_btn *info)
     lv_obj_set_style_border_width(label, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
 
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
-    const bool right_col_touch_ofs =
+    /* 图标仅显示；透明 hit 统一扩大范围（含文字行 + 擦边）。 */
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+    const bool right_col =
         (info->idx == SCREEN3_ID || info->idx == SCREEN6_ID || info->idx == SCREEN9_ID);
-    if (right_col_touch_ofs) {
-        /* 显示留在 pos_x/pos_y；透明按钮承载偏移后的命中区 */
-        lv_obj_clear_flag(btn, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_t *hit = lv_btn_create(parent);
-        lv_obj_remove_style_all(hit);
-        lv_obj_set_size(hit, 50, 50);
-        lv_obj_set_pos(hit, info->pos_x + MENU_BTN_RIGHT_HIT_OFS_X, info->pos_y + MENU_BTN_RIGHT_HIT_OFS_Y);
-        lv_obj_set_style_bg_opa(hit, LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_set_style_border_width(hit, 0, LV_PART_MAIN);
-        lv_obj_add_flag(hit, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_cb(hit, menu_btn_event_cb, LV_EVENT_CLICKED, (void *)info);
-        lv_obj_set_ext_click_area(hit, 10);
-    } else {
-        lv_obj_add_event_cb(btn, menu_btn_event_cb, LV_EVENT_CLICKED, (void *)info);
-    }
+    const lv_coord_t hit_x = (lv_coord_t)(info->pos_x + (right_col ? MENU_BTN_RIGHT_HIT_OFS_X : 0));
+    const lv_coord_t hit_y = (lv_coord_t)(info->pos_y + (right_col ? MENU_BTN_RIGHT_HIT_OFS_Y : 0));
+    lv_obj_t *hit = lv_btn_create(parent);
+    lv_obj_remove_style_all(hit);
+    lv_obj_set_size(hit, MENU_BTN_HIT_W, MENU_BTN_HIT_H);
+    lv_obj_set_pos(hit, hit_x, hit_y);
+    lv_obj_set_style_bg_opa(hit, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(hit, 0, LV_PART_MAIN);
+    lv_obj_add_flag(hit, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(hit, menu_btn_event_cb, LV_EVENT_CLICKED, (void *)info);
+    lv_obj_set_ext_click_area(hit, MENU_BTN_CLICK_EXT);
 #else
     lv_obj_add_event_cb(btn, menu_btn_event_cb, LV_EVENT_CLICKED, (void *)info);
+    lv_obj_set_ext_click_area(btn, MENU_BTN_CLICK_EXT);
 #endif
 }
 
@@ -967,7 +975,11 @@ static bool setting_rgb_sync_charging(bool refresh)
         ui_setting_handle *h = &setting_handle_list[i];
         if (h->type == UI_SETTING_TYPE_RGB && h->st != NULL) {
             lv_label_set_text(h->st, setting_rgb_mode_text(charging ? 3 : ui_setting_get_rgb_mode()));
-            if (refresh && state_changed) {
+            if (refresh && state_changed
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+                && !ui_deckpro_epd_nav_hold_active()
+#endif
+            ) {
                 ui_disp_full_refr();
             }
             break;
@@ -1026,6 +1038,10 @@ void ui_deckpro_setting_defer_refresh(void)
         return;
     }
     ui_deckpro_setting_refresh_labels();
+    /* 进页 hold 期间 prepare 会刷一次，勿叠第二次 FULL */
+    if (ui_deckpro_epd_nav_hold_active()) {
+        return;
+    }
     ui_disp_full_refr();
 }
 #endif
@@ -1189,13 +1205,14 @@ static void create2(lv_obj_t *parent)
     scr_back_btn_create(parent, ("Setting"), scr2_btn_event_cb);
 }
 static void entry2(void) {
-    /* 与 volatile 状态同步到 GPIO（防止休眠 hold 等导致脚态与 UI 不一致） */
-    ui_setting_set_led_status(ui_setting_get_led_status());
+    /* 与 volatile 状态同步到 GPIO（防休眠 hold）；勿走 set_led_status（会 FULL，与 prepare 叠刷）。 */
+    const bool led_on = ui_setting_get_led_status();
+    ui_lighting_lamp_hw_only(led_on);
+    peri_lighting_led_key_sync_from_ui(led_on);
     setting_rgb_charging = -1;
     setting_rgb_sync_charging(false);
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
     ui_deckpro_setting_refresh_labels();
-    /* entry 已立即对齐文案，取消 set_led_status 带上的延时刷，避免进页后再全刷一帧。 */
     ui_deckpro_setting_defer_cancel();
 #endif
     /* 充电态边沿由 ui_deckpro_poll_power_ui() 驱动 setting_rgb_sync_charging(true)，
@@ -1347,8 +1364,10 @@ static void GPS_loop_timer_event(lv_timer_t * t)
             s_gps_deck_pending = false;
             W20_GPS_LOGLN("[GPS-UI] handoff OK -> ui_gps_task_resume, timer 5s");
             ui_gps_task_resume();
-            (void)scr3_GPS_updata();
-            ui_disp_full_refr();
+            /* 进页 prepare 已刷过 NoFix 布局；仅真实数据变化才再 FULL，避免连刷两帧 */
+            if (scr3_GPS_updata() && !ui_deckpro_epd_flush_busy()) {
+                ui_disp_full_refr();
+            }
             lv_timer_set_period(t, 5000);
             return;
         }
@@ -1537,9 +1556,8 @@ static void wifi_menu_power_off_deferred_cb(lv_timer_t *t)
 static void scr4_btn_event_cb(lv_event_t * e)
 {
     if(e->code == LV_EVENT_CLICKED){
-        /* 先切 LVGL 并刷主菜单；WiFi 停服延后，避免 touch 回调内阻塞 + PART 刷与 FULL 刷竞态。 */
+        /* 与其它子菜单一致：prepare 作废在途刷；勿 epd_drain 卡死 ~1.3s。停服延后。 */
         ui_deckpro_pause_aux_timers();
-        w20_deckpro_epd_drain();
         scr_mgr_pop(false);
         lv_timer_create(wifi_menu_power_off_deferred_cb, 50, NULL);
     }
@@ -1566,11 +1584,8 @@ static void create4(lv_obj_t *parent)
 
 static void entry4(void) 
 {
-#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
-    ui_wifi_menu_session_begin();
-#endif
-    /* 仅展示子菜单，不在此上电 WiFi（避免与已启用的 BLE 冲突导致重启）。
-     * 实际用网在 WIFI Config / Scan / OTA 子页再 ui_wifi_menu_power_on()。 */
+    /* 仅展示 WiFi 列表：不在此 stop WebServer/关 BLE。
+     * 进 Config / Scan / OTA 子页再 session_begin，避免「点进又退出」白停一次服务。 */
 }
 static void exit4(void) {
     ui_wifi_provisioning_set_ui_callback(NULL);
@@ -1937,7 +1952,8 @@ static void wifi_cfg_disconnect_btn_cb(lv_event_t *e)
     W20_WIFI_LOGLN("[WiFiCfg] Disconnect → SoftAP re-provision (join other WiFi)");
     ui_wifi_provisioning_start(true);
     wifi_cfg_update_status();
-    ui_disp_full_refr();
+    ui_disp_full_refr(); /* SoftAP 指引；随后尽快停墨，避免 SPI 拖死门户 HTTP */
+    wifi_cfg_arm_epd_pause_soon();
 }
 
 static void wifi_cfg_deferred_start_cb(lv_timer_t *timer)
@@ -1961,7 +1977,8 @@ static void wifi_cfg_deferred_start_cb(lv_timer_t *timer)
     ui_wifi_provisioning_start(needSoftAp);
     wifi_cfg_update_status();
     if (needSoftAp) {
-        ui_disp_full_refr(); /* 先刷 SoftAP 指引，arm_epd_pause 会随后停墨 */
+        ui_disp_full_refr(); /* 先刷 SoftAP 指引 */
+        wifi_cfg_arm_epd_pause_soon(); /* 尽快停墨，门户期勿与 EPD SPI 抢总线 */
     }
     /* SoftAP 配网期间勿开 taskbar 秒级刷新；已连/自动重连中可恢复。 */
     if (!needSoftAp) {
@@ -1977,10 +1994,12 @@ static void scr4_1_btn_event_cb(lv_event_t * e)
         }
         wifi_cfg_cancel_epd_pause_timer();
         wifi_cfg_set_epd_paused(false);
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+        /* pop→prepare 已 FULL；勿再 ui_disp_full_refr 叠第二帧（日志 #22+#23） */
+        ui_deckpro_epd_nav_hold(true);
+#endif
         scr_mgr_pop(false);
         ui_deckpro_resume_aux_timers();
-        /* 配网成功/断连后返回列表：强制全刷，避免停墨残留导致「未刷新」 */
-        ui_disp_full_refr();
     }
 }
 
@@ -2050,16 +2069,12 @@ static void entry4_1(void)
 {
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
     w20_wifi_ota_stop();
-    if (ui_wifi_softap_is_up()) {
-        ui_wifi_force_ap_teardown(ui_wifi_is_connected());
-    }
 #endif
     /* 配网任务 prepareWifiRadioForAp() 已负责关 BLE 与 AP_STA，勿再 ui_wifi_menu_power_on() 重复初始化 */
     memset(wifi_cfg_last_line, 0, sizeof(wifi_cfg_last_line));
     wifi_cfg_disc_cache[0] = '\0';
     wifi_cfg_last_async_ms = 0;
     wifi_cfg_cancel_epd_pause_timer();
-    wifi_cfg_set_epd_paused(false);
     ui_deckpro_pause_aux_timers();
     ui_wifi_provisioning_set_ui_callback(wifi_cfg_on_prov_change);
     if (!wifi_cfg_status_timer) {
@@ -2068,6 +2083,14 @@ static void entry4_1(void)
     }
     wifi_cfg_update_status();
 
+    /* SoftAP 已在跑（从 WiFi 列表再进 Config）：绝不可 teardown，否则手机刚连上就被踢、网页进不去 */
+    if (ui_wifi_softap_is_up() || ui_wifi_provisioning_active()) {
+        W20_WIFI_LOGLN("[WiFiCfg] SoftAP already up — keep portal, no restart");
+        wifi_cfg_arm_epd_pause_soon();
+        return;
+    }
+
+    wifi_cfg_set_epd_paused(false);
     if (wifi_cfg_deferred_timer) {
         lv_timer_del(wifi_cfg_deferred_timer);
         wifi_cfg_deferred_timer = NULL;
@@ -2078,8 +2101,12 @@ static void entry4_1(void)
 static void wifi_cfg_exit_reclaim_cb(lv_timer_t *t)
 {
     lv_timer_del(t);
-    /* 等 SoftAP/门户停稳再清堆，避免与 provTask 抢锁 */
-    (void)ui_wifi_provisioning_wait_stopped(2500);
+    /* SoftAP 仍在（回到 WiFi 列表保留门户）时勿 wait/reclaim，否则卡 LVGL 并拆 HTTP */
+    if (ui_wifi_softap_is_up() || ui_wifi_provisioning_active()) {
+        W20_WIFI_LOGLN("[WiFiCfg] exit reclaim skipped (SoftAP still up)");
+        return;
+    }
+    (void)ui_wifi_provisioning_wait_stopped(800);
     ui_wifi_provisioning_reclaim_heap();
     W20_WIFI_LOG("[W20UI] WIFI Config exit reclaim heap=%u\n", (unsigned)ESP.getFreeHeap());
 }
@@ -2090,19 +2117,29 @@ static void exit4_1(void) {
         wifi_cfg_deferred_timer = NULL;
     }
     wifi_cfg_cancel_epd_pause_timer();
-    wifi_cfg_set_epd_paused(false);
     ui_wifi_provisioning_set_ui_callback(NULL);
     if (wifi_cfg_status_timer) {
         lv_timer_del(wifi_cfg_status_timer);
         wifi_cfg_status_timer = NULL;
     }
-    /* 勿在 LVGL 线程同步 stop/force teardown（易与 provTask 抢 WiFi 锁导致卡死）。 */
-    ui_wifi_provisioning_request_stop();
     wifi_cfg_disc_btn = NULL;
     wifi_cfg_disc_lab = NULL;
     wifi_cfg_disc_cache[0] = '\0';
     ui_deckpro_resume_aux_timers();
-    /* 延后清堆：扫网 JSON / 门户缓冲 / 空闲 wifiProv */
+
+    /* 退回 WiFi 列表：保留 SoftAP/门户，手机可继续打开 http://192.168.4.1
+     * 离开整个 WiFi 菜单时由 ui_wifi_menu_power_off() 统一 stop。 */
+    const bool back_to_wifi_list = (scr_mgr_prev_id() == SCREEN4_ID);
+    if (back_to_wifi_list && (ui_wifi_softap_is_up() || ui_wifi_provisioning_active())) {
+        /* 列表页允许刷墨；HTTP 可能稍慢，但不断手机关联 */
+        wifi_cfg_set_epd_paused(false);
+        W20_WIFI_LOGLN("[WiFiCfg] back to WIFI list — keep SoftAP portal");
+        return;
+    }
+
+    wifi_cfg_set_epd_paused(false);
+    /* 勿在 LVGL 线程同步 stop/force teardown（易与 provTask 抢 WiFi 锁导致卡死）。 */
+    ui_wifi_provisioning_request_stop();
     lv_timer_t *reclaim_t = lv_timer_create(wifi_cfg_exit_reclaim_cb, 80, NULL);
     lv_timer_set_repeat_count(reclaim_t, 1);
 }
@@ -3845,7 +3882,7 @@ static void create11(lv_obj_t *parent)
 
 static void entry11(void)
 {
-    ui_disp_full_refr();
+    /* FULL 由 scr_push_subscreen → prepare 统一刷，避免叠第二次 */
 }
 
 static void exit11(void)
@@ -3933,7 +3970,7 @@ static void create11_1(lv_obj_t *parent)
 
 static void entry11_1(void)
 {
-    ui_disp_full_refr();
+    /* FULL 由 prepare 统一刷 */
 }
 
 static void exit11_1(void)
@@ -4014,12 +4051,12 @@ struct w20_swipe_accum_state {
 #define MESH_HORIZONTAL_CANCEL_TAP_PX 8
 #endif
 
-/** 左上角返回箭头触摸热区（与 drawCommonHeader 电池左侧箭头对齐）。 */
+/** 左上角返回独占热区（物理 240×320 raw）。须盖住箭头+标题栏左段，且不与切页抢。 */
 #ifndef MESH_BACK_BTN_W
-#define MESH_BACK_BTN_W 28
+#define MESH_BACK_BTN_W 64
 #endif
 #ifndef MESH_BACK_BTN_H
-#define MESH_BACK_BTN_H 22
+#define MESH_BACK_BTN_H 52
 #endif
 
 /** 无弹窗时长按开菜单阈值。过短易把短按当成开窗。 */
@@ -4282,9 +4319,22 @@ static bool mesh_horizontal_swipe_intent(void)
     return s_swipe.accum_right >= MESH_HORIZONTAL_CANCEL_TAP_PX || s_swipe.accum_left >= MESH_HORIZONTAL_CANCEL_TAP_PX;
 }
 
+/**
+ * 返回 ◀ 在逻辑左上角；刷屏 Y 镜像后与主菜单同向，触控 raw 左上即热区。
+ * 按下或抬起任一点落在区内即算返回（手指略滑也不切页）。
+ */
 static bool mesh_back_btn_hit(int16_t x, int16_t y)
 {
     return x >= 0 && x < MESH_BACK_BTN_W && y >= 0 && y < MESH_BACK_BTN_H;
+}
+
+static bool mesh_back_session_hit(void)
+{
+    if (!s_mesh_press.active) {
+        return false;
+    }
+    return mesh_back_btn_hit(s_mesh_press.first_x, s_mesh_press.first_y) ||
+           mesh_back_btn_hit(s_mesh_press.last_x, s_mesh_press.last_y);
 }
 
 /**
@@ -4307,6 +4357,15 @@ static bool mesh_swipe_try_fire(int16_t x, int16_t y, bool on_release)
         return false;
     }
 
+    /* 返回区独占：按下或抬起落在左上角即回主菜单，不切页、不受滑动/短按抑制影响。 */
+    if (on_release && (mesh_back_session_hit() || mesh_back_btn_hit(x, y))) {
+        W20_UI_LOG("gesture_mesh BACK exclusive (%d,%d) first(%d,%d) -> deck menu", (int)x, (int)y,
+                   (int)s_mesh_press.first_x, (int)s_mesh_press.first_y);
+        ui_deckpro_exit_mesh();
+        swipe_accum_reset();
+        return true;
+    }
+
     /* 左右滑已禁用：有水平位移也不切帧，避免与短按打架。 */
     if (mesh_horizontal_swipe_intent() || mesh_slide_motion_detected()) {
         if (on_release) {
@@ -4318,19 +4377,13 @@ static bool mesh_swipe_try_fire(int16_t x, int16_t y, bool on_release)
         return false;
     }
 
-    /* 仅 TAP：左上角返回；否则短按切下一帧。 */
+    /* 仅 TAP：短按切下一帧（返回已在上面独占处理）。 */
     if (on_release && mesh_gesture_session_is_tap()) {
         const uint32_t now = millis();
         if (s_mesh_press.long_fired || s_mesh_press.gesture_claimed || mesh_tap_suppressed(now) ||
             s_mesh_ignore_press_until_up) {
             W20_UI_LOG("gesture_mesh TAP ignored (long/suppress) (%d,%d)", (int)x, (int)y);
             swipe_accum_clear_motion();
-            return true;
-        }
-        if (mesh_back_btn_hit(x, y)) {
-            W20_UI_LOG("gesture_mesh BACK btn tap (%d,%d) -> deck menu", (int)x, (int)y);
-            ui_deckpro_exit_mesh();
-            swipe_accum_reset();
             return true;
         }
         W20_UI_LOG("gesture_mesh TAP (%d,%d) -> USER_PRESS (next frame)", (int)x, (int)y);
@@ -4476,17 +4529,15 @@ static void poll_mesh_overlay_touch_only(int16_t x, int16_t y, bool pressed, uin
         const uint32_t dur = now - s_mesh_press.press_start_ms;
         if (s_mesh_press.long_fired || s_mesh_ignore_press_until_up) {
             W20_UI_LOG("mesh_touch TAP ignored after LONG overlay (%d,%d)", (int)tap_x, (int)tap_y);
+        } else if (mesh_back_session_hit() || mesh_back_btn_hit(tap_x, tap_y)) {
+            W20_UI_LOG("mesh_touch BACK exclusive (overlay) (%d,%d) -> deck menu", (int)tap_x, (int)tap_y);
+            ui_deckpro_exit_mesh();
         } else if (!s_mesh_press.gesture_claimed && dur > 0 && dur < MESH_OVERLAY_CONFIRM_LONG_MS &&
                    s_mesh_press.session_max_adx <= MESH_TAP_SUPPRESS_PX &&
                    s_mesh_press.session_max_ady <= MESH_TAP_SUPPRESS_PX) {
-            if (mesh_back_btn_hit(tap_x, tap_y) || mesh_back_btn_hit(s_mesh_press.first_x, s_mesh_press.first_y)) {
-                W20_UI_LOG("mesh_touch BACK btn (overlay) (%d,%d) -> deck menu", (int)tap_x, (int)tap_y);
-                ui_deckpro_exit_mesh();
-            } else {
-                /* 短按：切下一项（不关窗） */
-                W20_UI_LOG("mesh_touch TAP (%d,%d) overlay NEXT item", (int)tap_x, (int)tap_y);
-                mesh_inject_input(INPUT_BROKER_USER_PRESS, tap_x, tap_y);
-            }
+            /* 短按：切下一项（不关窗） */
+            W20_UI_LOG("mesh_touch TAP (%d,%d) overlay NEXT item", (int)tap_x, (int)tap_y);
+            mesh_inject_input(INPUT_BROKER_USER_PRESS, tap_x, tap_y);
             mesh_arm_tap_suppress(MESH_TAP_RELEASE_GUARD_MS);
         }
         mesh_touch_press_reset();
@@ -4497,7 +4548,7 @@ static void poll_mesh_overlay_touch_only(int16_t x, int16_t y, bool pressed, uin
     }
 }
 
-/** Meshtastic 页不跑 lv_task_handler，须直接读 CST3530 做触摸/滑动手势。 */
+/** Meshtastic 页不跑 lv_task_handler，须直接读 CST3530 做触摸/滑动手势（raw，与上笔一致）。 */
 static void poll_gesture_from_touch_chip(void)
 {
     int16_t x = 0;
@@ -4522,6 +4573,24 @@ static void poll_gesture_from_touch_chip(void)
     swipe_accum_expire(now, MESH_GESTURE_ACCUM_WINDOW_MS);
 
     if (pressed) {
+        /* 返回区按下始终开会话，不受切页后的短按抑制，避免点返回变成切页。 */
+        if (mesh_back_btn_hit(x, y)) {
+            if (!s_mesh_press.active) {
+                s_mesh_press.active = true;
+                s_mesh_press.long_fired = false;
+                s_mesh_press.gesture_claimed = false;
+                s_mesh_press.press_start_ms = now;
+                s_mesh_press.first_x = x;
+                s_mesh_press.first_y = y;
+                s_mesh_press.session_max_adx = 0;
+                s_mesh_press.session_max_ady = 0;
+            }
+            s_mesh_press.last_x = x;
+            s_mesh_press.last_y = y;
+            s_swipe.touching = true;
+            return;
+        }
+
         /* LONG 已消费本次按压：手指抬起前不开启新 TAP/切页会话（overlay 可能已关）。 */
         if (s_mesh_ignore_press_until_up) {
             s_swipe.touching = true;
@@ -4578,6 +4647,17 @@ static void poll_gesture_from_touch_chip(void)
         if (s_swipe.touching) {
             const int16_t rel_x = s_mesh_press.last_x;
             const int16_t rel_y = s_mesh_press.last_y;
+            if (s_mesh_press.active &&
+                (mesh_back_session_hit() || mesh_back_btn_hit(rel_x, rel_y))) {
+                W20_UI_LOG("gesture_mesh BACK exclusive release (%d,%d) -> deck menu", (int)rel_x, (int)rel_y);
+                ui_deckpro_exit_mesh();
+                s_swipe.touching = false;
+                s_mesh_ignore_press_until_up = false;
+                mesh_touch_press_reset();
+                swipe_accum_reset();
+                swipe_accum_expire(now, MESH_GESTURE_ACCUM_WINDOW_MS);
+                return;
+            }
             const bool long_or_suppress =
                 s_mesh_press.long_fired || s_mesh_ignore_press_until_up || mesh_tap_suppressed(now);
             if (!long_or_suppress && mesh_swipe_try_fire(rel_x, rel_y, true)) {
@@ -4587,18 +4667,10 @@ static void poll_gesture_from_touch_chip(void)
                 swipe_accum_reset();
             } else if (s_mesh_press.active && !s_mesh_press.gesture_claimed && !s_mesh_press.long_fired &&
                        !mesh_slide_motion_detected() && !mesh_horizontal_swipe_intent()) {
-                /* try_fire 未吃掉的短按兜底（含左上角返回） */
                 const uint32_t dur = now - s_mesh_press.press_start_ms;
                 if (dur > 0 && dur < MESH_TOUCH_LONG_MS && !mesh_tap_suppressed(now)) {
-                    if (mesh_back_btn_hit(rel_x, rel_y) ||
-                        mesh_back_btn_hit(s_mesh_press.first_x, s_mesh_press.first_y)) {
-                        W20_UI_LOG("gesture_mesh BACK btn tap fallback (%d,%d) -> deck menu", (int)rel_x,
-                                   (int)rel_y);
-                        ui_deckpro_exit_mesh();
-                    } else {
-                        W20_UI_LOG("mesh_touch TAP (%d,%d) -> USER_PRESS", (int)rel_x, (int)rel_y);
-                        mesh_inject_input(INPUT_BROKER_USER_PRESS, rel_x, rel_y);
-                    }
+                    W20_UI_LOG("mesh_touch TAP (%d,%d) -> USER_PRESS", (int)rel_x, (int)rel_y);
+                    mesh_inject_input(INPUT_BROKER_USER_PRESS, rel_x, rel_y);
                     mesh_arm_tap_suppress(MESH_TAP_RELEASE_GUARD_MS);
                 }
             } else if (mesh_horizontal_swipe_intent() && !mesh_slide_motion_detected()) {
@@ -4724,6 +4796,12 @@ static void menu_taskbar_epd_sync(void)
         return;
     }
     lv_obj_invalidate(menu_taskbar);
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+    /* 退回主菜单时 prepare 已排 FULL；导航窗口内勿再叠一帧 */
+    if (ui_deckpro_epd_nav_hold_active() || ui_deckpro_epd_flush_busy()) {
+        return;
+    }
+#endif
     ui_disp_full_refr();
 }
 

@@ -14,7 +14,7 @@
 /* ---------- 模块开关（0/1）---------- */
 
 #ifndef W20_LOG_BAT
-#define W20_LOG_BAT 1
+#define W20_LOG_BAT 0
 #endif
 
 #ifndef W20_LOG_WIFI
@@ -22,7 +22,7 @@
 #endif
 
 #ifndef W20_LOG_UI
-#define W20_LOG_UI 1
+#define W20_LOG_UI 0
 #endif
 
 /* 未单独指定时跟随 UI（触控/Setting 噪声大时可单独 -D=0/1） */

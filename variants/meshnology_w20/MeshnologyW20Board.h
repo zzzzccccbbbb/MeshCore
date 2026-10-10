@@ -83,6 +83,9 @@ public:
     return 0;
   }
 
+  /** 与 Deck 充电指示同源（VBUS / charging），供 Mesh UI 闪电标等使用。 */
+  bool isExternalPowered() override;
+
   const char *getManufacturerName() const override {
     return "Meshnology W20";
   }

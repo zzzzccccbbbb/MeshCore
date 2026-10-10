@@ -166,6 +166,8 @@ void ui_deckpro_enter_board_sleep(void);
 void ui_deckpro_epd_prepare_subscreen(void);
 /** 导航切换期间禁止墨水 flush（抬手→push 之间）；prepare_subscreen 会清除。 */
 void ui_deckpro_epd_nav_hold(bool hold);
+/** push/pop 导航 hold 期间为 true；此窗口内勿再额外 FULL，由 prepare 统一刷。 */
+bool ui_deckpro_epd_nav_hold_active(void);
 /** 子菜单 FULL 刷未完成：true 时 LVGL 点击会被吞，应排队导航。 */
 bool ui_deckpro_epd_nav_touch_locked(void);
 /** EPD 正在刷墨（pending 或尚未 done）：关机页等可见后再倒计时。 */

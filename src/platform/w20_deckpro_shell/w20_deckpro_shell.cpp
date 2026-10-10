@@ -1017,6 +1017,11 @@ void ui_deckpro_epd_nav_hold(bool hold)
     }
 }
 
+bool ui_deckpro_epd_nav_hold_active(void)
+{
+    return s_touch_hold_epd;
+}
+
 bool ui_deckpro_epd_nav_touch_locked(void)
 {
     return w20_epd_nav_touch_lock_active();

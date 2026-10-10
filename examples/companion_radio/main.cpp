@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Mesh.h>
+#include <helpers/TxtDataHelpers.h>
 #include "MyMesh.h"
 
 static uint32_t _atoi(const char* sp) {
@@ -160,29 +161,27 @@ void setup() {
   );
 
 #if defined(BLE_PIN_CODE)
-  #if defined(BLE_DEVICE_NAME)
-    char ble_device_name[16];
-    strncpy(ble_device_name, BLE_DEVICE_NAME, sizeof(ble_device_name) - 1);
-    ble_device_name[sizeof(ble_device_name) - 1] = 0;
-    bluetooth_interface.begin(BLE_NAME_PREFIX, ble_device_name, the_mesh.getBLEPin());
-    {
-      NodePrefs *prefs = the_mesh.getNodePrefs();
-      bool sync = (strcmp(prefs->node_name, "@@MAC4") == 0 || strcmp(prefs->node_name, "@@MAC") == 0);
+  {
+    /* 对齐 w10 companion：节点名/BLE 用公钥前 4 字节 hex（8 位），去掉 Meshnology-XXXX */
+    NodePrefs *prefs = the_mesh.getNodePrefs();
+    const bool legacy = (strncmp(prefs->node_name, "Meshnology", 10) == 0) ||
+                        (strcmp(prefs->node_name, "@@MAC4") == 0) ||
+                        (strcmp(prefs->node_name, "@@MAC") == 0) ||
+                        (strcmp(prefs->node_name, "NONAME") == 0) ||
+                        (strcmp(prefs->node_name, "Meshnology-W20") == 0);
 #ifdef ADVERT_NAME
-      sync = sync || (strcmp(prefs->node_name, ADVERT_NAME) == 0);
+    const bool legacy_advert = (strcmp(prefs->node_name, ADVERT_NAME) == 0);
+#else
+    const bool legacy_advert = false;
 #endif
-      sync = sync || (strcmp(prefs->node_name, "Meshnology-W12") == 0 ||
-                      strcmp(prefs->node_name, "Meshnology-W13") == 0 ||
-                      strcmp(prefs->node_name, "Meshnology-W15") == 0 ||
-                      strcmp(prefs->node_name, "Meshnology-W20") == 0);
-      if (sync) {
-        snprintf(prefs->node_name, sizeof(prefs->node_name), "%s%s", BLE_NAME_PREFIX, ble_device_name);
-        the_mesh.savePrefs();
-      }
+    if (legacy || legacy_advert) {
+      char pub_key_hex[10];
+      mesh::Utils::toHex(pub_key_hex, the_mesh.self_id.pub_key, 4);
+      StrHelper::strncpy(prefs->node_name, pub_key_hex, sizeof(prefs->node_name));
+      the_mesh.savePrefs();
     }
-  #else
-    bluetooth_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
-  #endif
+    bluetooth_interface.begin(BLE_NAME_PREFIX, prefs->node_name, the_mesh.getBLEPin());
+  }
   interface_manager.addInterface(InterfaceType::Bluetooth, &bluetooth_interface);
 #endif
 

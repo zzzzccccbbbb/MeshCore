@@ -36,6 +36,44 @@
 
 #include "icons.h"
 
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+#include "platform/w20_deckpro/w20_power_battery.h"
+#include "platform/w20_deckpro/ui_deckpro_port.h"
+/** 与 ui_deckpro MESH_BACK_BTN_* 热区对应；顶边贴齐屏顶（与触控热区一致）。 */
+#ifndef MESH_BACK_HINT_W
+#define MESH_BACK_HINT_W 16
+#endif
+#ifndef MESH_TITLE_BASELINE_Y
+#define MESH_TITLE_BASELINE_Y 12 /* FreeSans 基线；过小会裁掉字上半 */
+#endif
+#ifndef MESH_TITLE_BAR_H
+#define MESH_TITLE_BAR_H 16
+#endif
+#ifndef MESH_PAGE_DOTS_Y
+#define MESH_PAGE_DOTS_Y 20
+#endif
+#ifndef MESH_BODY_DY
+#define MESH_BODY_DY 12 /* 切换点以下整块下移，避免挡图标/字 */
+#endif
+#ifndef MESH_HINT_EXTRA_DY
+#define MESH_HINT_EXTRA_DY 10 /* 图标下方 toggle/advert/hibernate 再下移 */
+#endif
+static void renderMeshBackHint(DisplayDriver &display)
+{
+  display.setColor(UIColor::title_txt);
+  /* 尖端朝左的 '<'（返回）；顶对齐屏顶附近 */
+  const int16_t tipX = 2;
+  const int16_t midY = 8;
+  for (int16_t i = 0; i < 7; i++) {
+    display.fillRect(tipX + i, midY - i, 2, 2);
+    display.fillRect(tipX + i, midY + i, 2, 2);
+  }
+}
+#endif
+#ifndef MESH_HINT_EXTRA_DY
+#define MESH_HINT_EXTRA_DY 0
+#endif
+
 class SplashScreen : public UIScreen {
   UITask* _task;
   unsigned long dismiss_after;
@@ -118,6 +156,25 @@ class HomeScreen : public UIScreen {
 
 
   void renderBatteryIndicator(DisplayDriver& display, uint16_t batteryMilliVolts) {
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+    /* 与 Deck 任务栏同源：统一 SOC + 充电态，勿用裸 mV 线性估 % */
+    int batteryPercentage = w20_battery_read_percent();
+    if (batteryPercentage < 0) {
+#ifndef BATT_MIN_MILLIVOLTS
+  #define BATT_MIN_MILLIVOLTS 3000
+#endif
+#ifndef BATT_MAX_MILLIVOLTS
+  #define BATT_MAX_MILLIVOLTS 4200
+#endif
+      batteryPercentage =
+          ((int)batteryMilliVolts - BATT_MIN_MILLIVOLTS) * 100 / (BATT_MAX_MILLIVOLTS - BATT_MIN_MILLIVOLTS);
+    }
+    if (batteryPercentage < 0) batteryPercentage = 0;
+    if (batteryPercentage > 100) batteryPercentage = 100;
+    if (w20_battery_charge_complete_latched())
+      batteryPercentage = 100;
+    const bool charging = ui_battery_charging() || ui_battery_vbus_in();
+#else
     // Convert millivolts to percentage
 #ifndef BATT_MIN_MILLIVOLTS
   #define BATT_MIN_MILLIVOLTS 3000
@@ -130,7 +187,34 @@ class HomeScreen : public UIScreen {
     int batteryPercentage = ((batteryMilliVolts - minMilliVolts) * 100) / (maxMilliVolts - minMilliVolts);
     if (batteryPercentage < 0) batteryPercentage = 0; // Clamp to 0%
     if (batteryPercentage > 100) batteryPercentage = 100; // Clamp to 100%
+    const bool charging = board.isExternalPowered();
+#endif
 
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+    /* 简洁电池条：与返回键顶缘同级下移，避免贴顶裁切；竖格填充更接近主菜单观感 */
+    const int iconWidth = 18;
+    const int iconHeight = 10;
+    const int iconX = display.width() - iconWidth - 4;
+    const int iconY = 3;
+    display.setColor(UIColor::title_txt);
+    display.drawRect(iconX, iconY, iconWidth - 2, iconHeight);
+    display.fillRect(iconX + iconWidth - 2, iconY + 2, 2, iconHeight - 4); /* 正极帽 */
+    const int innerW = iconWidth - 6;
+    const int fillW = (batteryPercentage * innerW) / 100;
+    if (fillW > 0) {
+      display.fillRect(iconX + 2, iconY + 2, fillW, iconHeight - 4);
+    }
+    if (charging) {
+      display.fillRect(iconX - 5, iconY + 4, 3, 2);
+      display.fillRect(iconX - 4, iconY + 2, 1, 6);
+    }
+#ifdef PIN_BUZZER
+    if (_task->isBuzzerQuiet()) {
+      display.setColor(UIColor::warning_txt);
+      display.drawXbm(iconX - (charging ? 16 : 10), iconY + 1, muted_icon, 8, 8);
+    }
+#endif
+#else
     // battery icon
     int iconWidth = 24;
     int iconHeight = 10;
@@ -150,7 +234,6 @@ class HomeScreen : public UIScreen {
 
     // while charging, show a bolt (or a plug once full) just left of the battery,
     // keeping the fill bar itself clean and uninterrupted
-    bool charging = board.isExternalPowered();
     if (charging) {
       // There's no charge-complete signal on most boards, so "full" is a high
       // voltage band rather than an exact 100% (a real pack rarely reads 4.2V).
@@ -167,6 +250,7 @@ class HomeScreen : public UIScreen {
       display.setColor(UIColor::warning_txt);
       display.drawXbm(iconX - (charging ? 18 : 9), iconY + 1, muted_icon, 8, 8);
     }
+#endif
 #endif
   }
 
@@ -210,14 +294,25 @@ public:
 
   int render(DisplayDriver& display) override {
     display.setColor(UIColor::title_bkg);
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+    display.fillRect(0, 0, display.width(), MESH_TITLE_BAR_H);
+#else
     display.fillRect(0, 0, display.width(), 12);
+#endif
     char tmp[80];
     // node name
     display.setTextSize(1);
     display.setColor(UIColor::title_txt);
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+    renderMeshBackHint(display);
+#endif
     char filtered_name[sizeof(_node_prefs->node_name)];
     display.translateUTF8ToBlocks(filtered_name, _node_prefs->node_name, sizeof(filtered_name));
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+    display.setCursor(MESH_BACK_HINT_W, MESH_TITLE_BASELINE_Y);
+#else
     display.setCursor(0, 2);
+#endif
     display.print(filtered_name);
 
     // battery voltage
@@ -229,7 +324,11 @@ public:
     } else {
       display.setColor(UIColor::title_bkg);
     }
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+    int y = MESH_PAGE_DOTS_Y;
+#else
     int y = 14;
+#endif
     int x = display.width() / 2 - 5 * (HomePage::Count-1);
     for (uint8_t i = 0; i < HomePage::Count; i++, x += 10) {
       if (i == _page) {
@@ -239,11 +338,17 @@ public:
       }
     }
 
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+    auto by = [](int yy) { return yy + MESH_BODY_DY; };
+#else
+    auto by = [](int yy) { return yy; };
+#endif
+
     if (_page == HomePage::FIRST) {
       display.setColor(UIColor::primary_txt);
       display.setTextSize(2);
       sprintf(tmp, "MSG: %d", _task->getMsgCount());
-      display.drawTextCentered(display.width() / 2, 22, tmp);
+      display.drawTextCentered(display.width() / 2, by(22), tmp);
       
       #ifdef UI_SHOW_CLOCK
       display.setTextSize(3);
@@ -252,40 +357,40 @@ public:
       now += (int32_t)tz * 3600;
       DateTime dt (now);
       sprintf(tmp, "%02d:%02d", dt.hour(), dt.minute());
-      display.drawTextCentered(display.width() / 2, 60, tmp);
+      display.drawTextCentered(display.width() / 2, by(60), tmp);
       display.setTextSize(1);
       sprintf(tmp, "%02d/%02d/%d", dt.day(), dt.month(), dt.year());
-      display.drawTextCentered(display.width() / 2, 80, tmp);
+      display.drawTextCentered(display.width() / 2, by(80), tmp);
       #endif
       #ifdef WIFI_SSID
         IPAddress ip = WiFi.localIP();
         snprintf(tmp, sizeof(tmp), "IP: %d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
         display.setTextSize(1);
-        display.drawTextCentered(display.width() / 2, 54, tmp);
+        display.drawTextCentered(display.width() / 2, by(54), tmp);
       #endif
       if (_task->hasConnection()) {
         display.setColor(UIColor::warning_txt);
         display.setTextSize(1);
         #ifdef UI_SHOW_CLOCK
-        display.drawTextCentered(display.width() / 2, 110, "< Connected >");
+        display.drawTextCentered(display.width() / 2, by(110), "< Connected >");
         #else
-        display.drawTextCentered(display.width() / 2, 43, "< Connected >");
+        display.drawTextCentered(display.width() / 2, by(43), "< Connected >");
         #endif
       } else if (the_mesh.getBLEPin() != 0) { // BT pin
         display.setColor(UIColor::warning_txt);
         sprintf(tmp, "Pin:%d", the_mesh.getBLEPin());
         #ifdef UI_SHOW_CLOCK
         display.setTextSize(1);
-        display.drawTextCentered(display.width() / 2, 110, tmp);
+        display.drawTextCentered(display.width() / 2, by(110), tmp);
         #else
         display.setTextSize(2);
-        display.drawTextCentered(display.width() / 2, 43, tmp);
+        display.drawTextCentered(display.width() / 2, by(43), tmp);
         #endif
       }
     } else if (_page == HomePage::RECENT) {
       the_mesh.getRecentlyHeard(recent, UI_RECENT_LIST_SIZE);
       display.setColor(UIColor::primary_txt);
-      int y = 20;
+      int y = by(20);
       for (int i = 0; i < UI_RECENT_LIST_SIZE; i++, y += 11) {
         auto a = &recent[i];
         if (a->name[0] == 0) continue;  // empty slot
@@ -310,40 +415,35 @@ public:
     } else if (_page == HomePage::RADIO) {
       display.setColor(UIColor::primary_txt);
       display.setTextSize(1);
-      // freq / sf
-      display.setCursor(0, 20);
       sprintf(tmp, "FQ: %06.3f   SF: %d", _node_prefs->freq, _node_prefs->sf);
-      display.print(tmp);
+      display.drawTextCentered(display.width() / 2, by(20), tmp);
 
-      display.setCursor(0, 31);
       sprintf(tmp, "BW: %03.2f     CR: %d", _node_prefs->bw, _node_prefs->cr);
-      display.print(tmp);
+      display.drawTextCentered(display.width() / 2, by(31), tmp);
 
-      // tx power,  noise floor
-      display.setCursor(0, 42);
       sprintf(tmp, "TX: %ddBm", _node_prefs->tx_power_dbm);
-      display.print(tmp);
-      display.setCursor(0, 53);
+      display.drawTextCentered(display.width() / 2, by(42), tmp);
+
       sprintf(tmp, "Noise floor: %d", radio_driver.getNoiseFloor());
-      display.print(tmp);
+      display.drawTextCentered(display.width() / 2, by(53), tmp);
     } else if (_page == HomePage::BLUETOOTH) {
       display.setColor(UIColor::corp_blue);
-      display.drawXbm((display.width() - 32) / 2, 18,
+      display.drawXbm((display.width() - 32) / 2, by(18),
           _task->isBluetoothEnabled() ? bluetooth_on : bluetooth_off,
           32, 32);
       display.setColor(UIColor::secondary_txt);
       display.setTextSize(1);
-      display.drawTextCentered(display.width() / 2, 64 - 11, "toggle: " PRESS_LABEL);
+      display.drawTextCentered(display.width() / 2, by(64 - 11) + MESH_HINT_EXTRA_DY, "toggle: " PRESS_LABEL);
     } else if (_page == HomePage::ADVERT) {
       display.setColor(UIColor::corp_blue);
-      display.drawXbm((display.width() - 32) / 2, 18, advert_icon, 32, 32);
+      display.drawXbm((display.width() - 32) / 2, by(18), advert_icon, 32, 32);
       display.setColor(UIColor::secondary_txt);
-      display.drawTextCentered(display.width() / 2, 64 - 11, "advert: " PRESS_LABEL);
+      display.drawTextCentered(display.width() / 2, by(64 - 11) + MESH_HINT_EXTRA_DY, "advert: " PRESS_LABEL);
 #if ENV_INCLUDE_GPS == 1
     } else if (_page == HomePage::GPS) {
       LocationProvider* nmea = sensors.getLocationProvider();
       char buf[50];
-      int y = 18;
+      int y = by(18);
       bool gps_state = _task->getGPSState();
 #ifdef PIN_GPS_SWITCH
       bool hw_gps_state = digitalRead(PIN_GPS_SWITCH);
@@ -389,7 +489,7 @@ public:
 #endif
 #if UI_SENSORS_PAGE == 1
     } else if (_page == HomePage::SENSORS) {
-      int y = 18;
+      int y = by(18);
       refresh_sensors();
       char buf[30];
       char name[30];
@@ -467,11 +567,11 @@ public:
       display.setTextSize(1);
       if (_shutdown_init) {
         display.setColor(UIColor::warning_txt);
-        display.drawTextCentered(display.width() / 2, 34, "hibernating...");
+        display.drawTextCentered(display.width() / 2, by(34), "hibernating...");
       } else {
         display.setColor(UIColor::secondary_txt);
-        display.drawXbm((display.width() - 32) / 2, 18, power_icon, 32, 32);
-        display.drawTextCentered(display.width() / 2, 64 - 11, "hibernate:" PRESS_LABEL);
+        display.drawXbm((display.width() - 32) / 2, by(18), power_icon, 32, 32);
+        display.drawTextCentered(display.width() / 2, by(64 - 11) + MESH_HINT_EXTRA_DY, "hibernate:" PRESS_LABEL);
       }
 #endif
     }
@@ -485,9 +585,11 @@ public:
     }
     if (c == KEY_NEXT || c == KEY_RIGHT) {
       _page = (_page + 1) % HomePage::Count;
+#if !(defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL))
       if (_page == HomePage::RECENT) {
         _task->showAlert("Recent adverts", 800);
       }
+#endif
       return true;
     }
     if (c == KEY_ENTER && _page == HomePage::BLUETOOTH) {

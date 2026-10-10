@@ -51,6 +51,8 @@ static char s_pendingPass[65] = {0};
 static String s_scanJsonCache = "{\"status\":\"ok\",\"scanning\":false,\"data\":[]}";
 static unsigned long s_lastScanMs = 0;
 static bool s_scanInProgress = false;
+/** SoftAP 已起但 SSID 缓存空：无客户时只补扫一次（手机连上后无法再扫） */
+static bool s_emptyCacheFillTried = false;
 static unsigned long s_apWatchLastMs = 0;
 static volatile bool s_startRequested = false;
 static volatile bool s_stopRequested = false;
@@ -298,7 +300,8 @@ static const char PORTAL_PAGE[] PROGMEM =
     "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
     "<title>w20 WiFi</title><style>"
     ":root{--bg:#0c1117;--card:#151d28;--t:#e6edf5;--m:#8b9cb3;--a:#3dd68c;--b:#263244;--e:#ff7b7b}"
-    "*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--t);padding:16px}"
+    "*{box-sizing:border-box}html{color-scheme:dark}"
+    "body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--t);padding:16px}"
     ".w{max-width:420px;margin:0 auto}.h{display:flex;gap:10px;align-items:center;margin:0 0 14px}"
     ".logo{width:36px;height:36px;border-radius:10px;background:var(--a);display:flex;align-items:center;"
     "justify-content:center;font-size:9px;font-weight:800;color:#0c1117}"
@@ -307,11 +310,17 @@ static const char PORTAL_PAGE[] PROGMEM =
     ".l{display:block;font-size:12px;color:var(--m);margin:0 0 4px}.r{display:flex;gap:8px}"
     ".r select,.r input{flex:1;min-width:0;margin:0}"
     "select,input,button{width:100%;padding:11px 12px;margin:0 0 8px;border-radius:9px;border:1px solid var(--b);"
-    "background:#0f1620;color:var(--t);font-size:15px}"
+    "background:#0f1620;color:var(--t);font-size:15px;-webkit-appearance:none;appearance:none}"
+    "input,select{background-color:#0f1620;color:#e6edf5;-webkit-text-fill-color:#e6edf5;"
+    "caret-color:var(--a)}"
+    "input::placeholder{color:var(--m);opacity:1;-webkit-text-fill-color:var(--m)}"
+    "input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus{"
+    "-webkit-box-shadow:0 0 0 1000px #0f1620 inset;box-shadow:0 0 0 1000px #0f1620 inset;"
+    "-webkit-text-fill-color:#e6edf5;caret-color:var(--a);transition:background-color 9999s}"
     "select:focus,input:focus{outline:none;border-color:var(--a);"
     "box-shadow:0 0 0 2px rgba(61,214,140,.35);caret-color:var(--a)}"
     "select:focus-visible,input:focus-visible{outline:none}"
-    "select option:checked,select option:focus{background:var(--a);color:#0c1117}"
+    "select option,select option:checked,select option:focus{background:#0f1620;color:#e6edf5}"
     "button{margin:2px 0 0;background:var(--a);color:#0c1117;border:0;font-weight:600}"
     "button:disabled{opacity:.45}.bs{background:transparent;color:var(--m);border:1px solid var(--b);width:auto;flex-shrink:0;margin:0}"
     ".be{width:44px;min-width:44px;padding:0;display:flex;align-items:center;justify-content:center}"
@@ -324,10 +333,12 @@ static const char PORTAL_PAGE[] PROGMEM =
     ".hi{font-size:12px;color:var(--m);margin:0 0 10px;line-height:1.4}"
     "</style></head><body><div class=w><div class=h><div class=logo>W20</div>"
     "<div><h1>w20 MESHnology</h1><p class=s>WiFi Setup</p></div></div><div class=c>"
-    "<p class=hi>Connect to your router or phone hotspot.</p>"
+    "<p class=hi>Connect to your router or phone hotspot. Phone on SoftAP cannot rescan — type SSID if list empty.</p>"
     "<label class=l>Network</label><div class=r>"
     "<select id=ssid><option value=\"\">Loading...</option></select>"
     "<button type=button class=bs id=btnScan onclick=scan()>Refresh</button></div>"
+    "<label class=l>Or type SSID</label>"
+    "<input id=ssidManual type=text placeholder=\"SSID if list empty\" autocomplete=off maxlength=32>"
     "<label class=l>Password</label><div class=r>"
     "<input id=pass type=password placeholder=\"WiFi password\" autocomplete=off>"
     "<button type=button class=\"bs be\" id=btnEye onclick=togglePass() title=\"Show password\" aria-label=\"Show password\">"
@@ -341,6 +352,8 @@ static const char PORTAL_PAGE[] PROGMEM =
     "function togglePass(){var p=document.getElementById('pass'),b=document.getElementById('btnEye'),show=p.type==='password';"
     "p.type=show?'text':'password';b.classList.toggle('on',show);"
     "b.title=show?'Hide password':'Show password';b.setAttribute('aria-label',b.title);}"
+    "function pickSsid(){var m=(document.getElementById('ssidManual').value||'').trim();"
+    "return m||(document.getElementById('ssid').value||'');}"
     "function scan(){if(T)clearTimeout(T);document.getElementById('btnScan').disabled=1;"
     "if(!ok)msg('Refreshing...');"
     "fetch('/json/scanNetworks').then(function(r){return r.json();}).then(function(j){"
@@ -349,10 +362,11 @@ static const char PORTAL_PAGE[] PROGMEM =
     "else{s.innerHTML='';L.forEach(function(n){var o=document.createElement('option');o.value=n.ssid;"
     "o.textContent=n.ssid+' ('+n.rssi+' dBm)';s.appendChild(o);});}T=setTimeout(scan,2000);return;}"
     "document.getElementById('btnScan').disabled=0;s.innerHTML='';"
-    "if(!L.length){s.innerHTML='<option value=\"\">(no networks)</option>';if(!ok)msg('No networks. Tap Refresh.','er');return;}"
+    "if(!L.length){s.innerHTML='<option value=\"\">(no networks)</option>';"
+    "if(!ok)msg('No list (phone on SoftAP). Type SSID below.','er');return;}"
     "L.forEach(function(n){var o=document.createElement('option');o.value=n.ssid;"
     "o.textContent=n.ssid+' ('+n.rssi+' dBm)';s.appendChild(o);});"
-    "if(!busy&&!ok)msg('Select a network and enter password');"
+    "if(!busy&&!ok)msg('Select or type SSID, then enter password');"
     "}).catch(function(){document.getElementById('btnScan').disabled=0;if(!ok)msg('Scan failed','er');});}"
     "function poll(){if(S)clearTimeout(S);pa++;"
     "fetch('/json/wifi/status').then(function(r){return r.json();}).then(function(j){pf=0;"
@@ -361,14 +375,15 @@ static const char PORTAL_PAGE[] PROGMEM =
     "msg(j.message||'Connecting...');S=setTimeout(poll,500);})"
     ".catch(function(){pf++;if(pa>=40&&pf>=20){done();msg('Connected on device','ok');return;}"
     "msg('Waiting...');S=setTimeout(poll,800);});}"
-    "function connect(){if(ok)return;var a=document.getElementById('ssid').value,p=document.getElementById('pass').value;"
-    "if(!a){msg('Select a network','er');return;}if(!p){msg('Password required','er');return;}"
+    "function connect(){if(ok)return;var a=pickSsid(),p=document.getElementById('pass').value;"
+    "if(!a){msg('Select or type SSID','er');return;}if(!p){msg('Password required','er');return;}"
     "if(p.length<8){msg('Connection failed','er');return;}busySet(1);pf=0;pa=0;msg('Submitting...');"
     "fetch('/json/wifi/connect',{method:'POST',headers:{'Content-Type':'application/json'},"
     "body:JSON.stringify({ssid:a,password:p})}).then(function(r){return r.json();}).then(function(j){"
     "if(j.status==='ok')poll();else{busySet(0);msg(j.message||'Submit failed','er');}})"
     ".catch(function(){busySet(0);msg('Request failed','er');});}"
-    "document.getElementById('ssid').onchange=function(){if(!ok)document.getElementById('pass').value='';};"
+    "document.getElementById('ssid').onchange=function(){if(!ok){document.getElementById('pass').value='';"
+    "document.getElementById('ssidManual').value='';}};"
     "scan();"
     "</script></body></html>";
 
@@ -618,22 +633,30 @@ static void handleScanNetworks()
     const unsigned long age = (s_lastScanMs == 0) ? ULONG_MAX : (millis() - s_lastScanMs);
     const bool cacheEmpty = (s_scanJsonCache.indexOf("\"ssid\"") < 0);
 
-    /* 门户运行中禁止同步扫网：clients 短暂为 0 时 sync scan 会掐掉 SoftAP beacon → 手机无网络/无弹窗 */
-    if (s_running) {
-        W20_WIFI_LOG("[WiFiProv] scanNetworks serve-cache only (portal clients=%d len=%u)\n", clients,
-                      (unsigned)s_scanJsonCache.length());
-    } else if (clients == 0 && (cacheEmpty || age >= kScanCacheMinMs) && !s_scanInProgress) {
-        refreshScanCache(true);
-    } else if (clients > 0) {
+    /*
+     * 有手机关联时绝不可 scan（单射频会掐 SoftAP）。
+     * 门户运行中默认只吐缓存；仅「无客户 + 缓存空」允许补扫一次，否则网页永远 (no networks)。
+     */
+    if (clients > 0) {
         W20_WIFI_LOG("[WiFiProv] scanNetworks serve-cache only (clients=%d len=%u)\n", clients,
+                      (unsigned)s_scanJsonCache.length());
+    } else if (cacheEmpty && !s_scanInProgress) {
+        W20_WIFI_LOGLN("[WiFiProv] scanNetworks empty cache, sync fill (no clients)");
+        refreshScanCache(true);
+        rebuildScanJsonFromSsidCache();
+    } else if (!s_running && age >= kScanCacheMinMs && !s_scanInProgress) {
+        refreshScanCache(true);
+    } else if (s_running) {
+        W20_WIFI_LOG("[WiFiProv] scanNetworks serve-cache only (portal clients=0 len=%u)\n",
                       (unsigned)s_scanJsonCache.length());
     }
 
     s_http.sendHeader("Access-Control-Allow-Origin", "*");
     s_http.sendHeader("Cache-Control", "no-cache");
     s_http.send(200, "application/json", s_scanJsonCache);
-    W20_WIFI_LOG("[WiFiProv] scanNetworks resp scanning=%d len=%u\n", s_scanInProgress ? 1 : 0,
-                  (unsigned)s_scanJsonCache.length());
+    W20_WIFI_LOG("[WiFiProv] scanNetworks resp scanning=%d len=%u empty=%d\n", s_scanInProgress ? 1 : 0,
+                  (unsigned)s_scanJsonCache.length(),
+                  (s_scanJsonCache.indexOf("\"ssid\"") < 0) ? 1 : 0);
 }
 
 static void handleWifiStatus()
@@ -1156,6 +1179,8 @@ static int pickSoftApChannel(void)
     if (n == WIFI_SCAN_FAILED || n < 0) {
         WiFi.scanDelete();
         Serial.println("[WiFiProv] scan failed, default ch=6");
+        /* 失败也别留下假“已扫过”时间戳，便于 SoftAP 起来后无客户时补扫 */
+        s_lastScanMs = 0;
         return 6;
     }
 
@@ -1174,6 +1199,10 @@ static int pickSoftApChannel(void)
     s_lastScanMs = millis();
     WiFi.scanDelete();
     W20_WIFI_LOG("[WiFiProv] pick SoftAP channel %d (score=%d, %d APs seen)\n", bestCh, bestScore, n);
+    if (n == 0) {
+        /* 0 AP：清时间戳，AP ready 路径可再补扫一次 */
+        s_lastScanMs = 0;
+    }
     return bestCh;
 }
 
@@ -1586,6 +1615,13 @@ static void servicePortal()
 {
     const int clients = WiFi.softAPgetStationNum();
     const bool connecting = (s_state == UI_WIFI_PROV_CONNECTING);
+    /* SoftAP 保留重进 Config 时不会再 beginPortal：无客户且缓存空则补扫一次 */
+    if (!s_emptyCacheFillTried && s_state == UI_WIFI_PROV_AP && clients == 0 && !s_scanInProgress &&
+        s_scanJsonCache.indexOf("\"ssid\"") < 0) {
+        s_emptyCacheFillTried = true;
+        W20_WIFI_LOGLN("[WiFiProv] servicePortal empty cache fill (no clients)");
+        refreshScanCache(true);
+    }
     /* 门户期抬高 DNS/HTTP 频次：手机刚连上 clients 可能短时为 0，过低会丢 captive 探测 */
     const int dnsPasses = (clients > 0 || connecting || s_running) ? 24 : 4;
     const int httpPasses = (clients > 0 || connecting || s_running) ? 8 : 1;
@@ -1622,8 +1658,18 @@ static bool beginPortalServices(const IPAddress &apIp, bool scan_for_channel)
     if (s_lastScanMs == 0) {
         s_lastScanMs = millis();
     }
+    /* SoftAP 已起、手机尚未连：缓存仍空则立刻补扫（连上后无法再扫） */
+    s_emptyCacheFillTried = false;
+    if (s_scanJsonCache.indexOf("\"ssid\"") < 0 && WiFi.softAPgetStationNum() == 0) {
+        W20_WIFI_LOGLN("[WiFiProv] AP ready but SSID cache empty — fill before phone joins");
+        s_emptyCacheFillTried = true;
+        refreshScanCache(true);
+    } else if (s_scanJsonCache.indexOf("\"ssid\"") >= 0) {
+        s_emptyCacheFillTried = true;
+    }
     s_apWatchLastMs = millis();
-    W20_WIFI_LOG("[WiFiProv] AP ready %s http://%s (scan deferred until phone HTTP)\n", s_apSsid, apIp.toString().c_str());
+    W20_WIFI_LOG("[WiFiProv] AP ready %s http://%s cache_ssids=%d\n", s_apSsid, apIp.toString().c_str(),
+                  (s_scanJsonCache.indexOf("\"ssid\"") >= 0) ? 1 : 0);
     return true;
 }
 
@@ -1993,6 +2039,7 @@ void ui_wifi_provisioning_reclaim_heap(void)
     s_scanJsonCache = "{\"status\":\"ok\",\"scanning\":false,\"data\":[]}";
     s_lastScanMs = 0;
     s_scanInProgress = false;
+    s_emptyCacheFillTried = false;
     s_ssidChCount = 0;
     WiFi.scanDelete();
 

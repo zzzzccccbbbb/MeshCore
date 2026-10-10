@@ -46,6 +46,8 @@ bool scr_mgr_push(int id, bool anim);
 bool scr_mgr_pop(bool anim);
 /** 栈顶屏幕 id；无栈时返回 -1。 */
 int scr_mgr_top_id(void);
+/** 栈顶之下一屏 id（pop 目标）；无则 -1。exit() 里可用来判断「回到谁」。 */
+int scr_mgr_prev_id(void);
 /** 栈仅一层（未 push 子屏）时为 true。 */
 bool scr_mgr_is_root_top(void);
 
@@ -58,6 +60,7 @@ void scr_mgr_set_bg_color(uint32_t c);
 /** 进/退子菜单前：取消待刷 PART，下次 LVGL 刷新走 FULL（实现在 w20_deckpro_shell.cpp）。 */
 void ui_deckpro_epd_prepare_subscreen(void);
 void ui_deckpro_epd_nav_hold(bool hold);
+bool ui_deckpro_epd_nav_hold_active(void);
 /** 子菜单导航 FULL 刷未完成时为 true（LVGL 点击会被吞）。 */
 bool ui_deckpro_epd_nav_touch_locked(void);
 /** EPD 正在刷墨：关机页等画面落地后再 hold。 */

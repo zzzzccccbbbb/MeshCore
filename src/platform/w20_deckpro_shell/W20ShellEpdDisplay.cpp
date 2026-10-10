@@ -11,41 +11,23 @@ ColorVal UIColor::popup_bkg = GxEPD_WHITE;
 ColorVal UIColor::popup_txt = GxEPD_BLACK;
 ColorVal UIColor::corp_blue = GxEPD_BLACK;
 
-/*
- * Match Deck panel orientation without setRotation(2):
- * FLIP_Y aligns with Deck LVGL flush; FLIP_X corrects left-right mirror.
- */
-#ifndef W20_MESHCORE_EPD_FLIP_Y
-#define W20_MESHCORE_EPD_FLIP_Y 1
-#endif
-#ifndef W20_MESHCORE_EPD_FLIP_X
-#define W20_MESHCORE_EPD_FLIP_X 1
+/* 与 w20_meshtastic EInkDisplay2::forceDisplay（非 flip_screen）一致：只做 Y 镜像 blit */
+#ifndef W20_MESHCORE_BLIT_MIRROR_Y
+#define W20_MESHCORE_BLIT_MIRROR_Y 1
 #endif
 
-static int s_log_x = 0;
-static int s_log_y = 0;
+bool w20_shell_epd_flip_x(void) { return false; }
+bool w20_shell_epd_flip_y(void) { return false; }
+uint8_t w20_shell_epd_rotation(void) { return 0; }
 
-static inline int epd_map_x(int x, int w = 0)
+static inline uint16_t canvas_color(ColorVal c)
 {
-#if W20_MESHCORE_EPD_FLIP_X
-  return EINK_WIDTH - x - w;
-#else
-  (void)w;
-  return x;
-#endif
+  /* GxEPD：非白即黑；canvas1：非 0 即点亮(黑) */
+  return (c == (ColorVal)GxEPD_WHITE) ? 0 : 1;
 }
 
-static inline int epd_map_y(int y, int h = 0)
+bool W20ShellEpdDisplay::begin()
 {
-#if W20_MESHCORE_EPD_FLIP_Y
-  return EINK_HEIGHT - y - h;
-#else
-  (void)h;
-  return y;
-#endif
-}
-
-bool W20ShellEpdDisplay::begin() {
   if (!w20_deckpro_shell_epd_reuse_ready()) {
     return false;
   }
@@ -53,91 +35,108 @@ bool W20ShellEpdDisplay::begin() {
   if (_epd == nullptr) {
     return false;
   }
+  if (_canvas == nullptr) {
+    _canvas = new GFXcanvas1(EINK_WIDTH, EINK_HEIGHT);
+    if (_canvas == nullptr) {
+      return false;
+    }
+  }
   _epd->setRotation(0);
+  _epd->setPartialWindow(0, 0, EINK_WIDTH, EINK_HEIGHT);
   setTextSize(1);
   _isOn = true;
   return true;
 }
 
-void W20ShellEpdDisplay::restoreDeckRotation() {
+void W20ShellEpdDisplay::restoreDeckRotation()
+{
   if (_epd)
     _epd->setRotation(0);
 }
 
-void W20ShellEpdDisplay::turnOn() {
+void W20ShellEpdDisplay::turnOn()
+{
   if (!_epd) begin();
   _isOn = true;
 }
 
-void W20ShellEpdDisplay::turnOff() {
+void W20ShellEpdDisplay::turnOff()
+{
   _isOn = false;
 }
 
-void W20ShellEpdDisplay::clear() {
-  if (!_epd) return;
-  _epd->fillScreen(GxEPD_WHITE);
-  _epd->setTextColor(GxEPD_BLACK);
+void W20ShellEpdDisplay::clear()
+{
+  if (!_canvas) return;
+  _canvas->fillScreen(0);
   _crc.reset();
 }
 
-void W20ShellEpdDisplay::startFrame(ColorVal bkg) {
-  if (!_epd) return;
+void W20ShellEpdDisplay::startFrame(ColorVal bkg)
+{
+  if (!_canvas || !_epd) return;
   w20_deckpro_epd_lock();
-  _epd->setFullWindow();
-  _epd->fillScreen(bkg);
-  _epd->setTextColor(_curr_color = UIColor::primary_txt);
+  _canvas->fillScreen(canvas_color(bkg) ? 1 : 0);
+  /* bkg 白=0；若传入黑底则整屏 1 */
+  if (bkg == (ColorVal)GxEPD_WHITE) {
+    _canvas->fillScreen(0);
+  } else {
+    _canvas->fillScreen(1);
+  }
+  _curr_color = 1;
+  _canvas->setTextColor(_curr_color);
   _crc.reset();
 }
 
-void W20ShellEpdDisplay::setTextSize(int sz) {
-  if (!_epd) return;
+void W20ShellEpdDisplay::setTextSize(int sz)
+{
+  if (!_canvas) return;
   _crc.update<int>(sz);
   switch (sz) {
     case 2:
-      _epd->setFont(&FreeSansBold12pt7b);
+      _canvas->setFont(&FreeSansBold12pt7b);
       break;
     case 3:
-      _epd->setFont(&FreeSans18pt7b);
+      _canvas->setFont(&FreeSans18pt7b);
       break;
     default:
-      _epd->setFont(&FreeSans9pt7b);
+      _canvas->setFont(&FreeSans9pt7b);
       break;
   }
 }
 
-void W20ShellEpdDisplay::setColor(ColorVal c) {
-  if (!_epd) return;
+void W20ShellEpdDisplay::setColor(ColorVal c)
+{
+  if (!_canvas) return;
   _crc.update<ColorVal>(c);
-  _epd->setTextColor(_curr_color = c);
+  _curr_color = canvas_color(c);
+  _canvas->setTextColor(_curr_color);
 }
 
-void W20ShellEpdDisplay::setCursor(int x, int y) {
-  if (!_epd) return;
+void W20ShellEpdDisplay::setCursor(int x, int y)
+{
+  if (!_canvas) return;
   _crc.update<int>(x);
   _crc.update<int>(y);
-  s_log_x = (int)(x * scale_x);
-  s_log_y = (int)(y * scale_y);
-  /* Actual cursor applied in print() after text width is known (X flip). */
-  _epd->setCursor(epd_map_x(s_log_x), epd_map_y(s_log_y));
+  _cursor_x = (int)(x * scale_x);
+  _cursor_y = (int)(y * scale_y);
+  _canvas->setCursor(_cursor_x, _cursor_y);
 }
 
-void W20ShellEpdDisplay::print(const char *str) {
-  if (!_epd || !str) return;
+void W20ShellEpdDisplay::print(const char *str)
+{
+  if (!_canvas || !str) return;
   _crc.update<char>(str, strlen(str));
-#if W20_MESHCORE_EPD_FLIP_X
-  int16_t x1, y1;
-  uint16_t tw, th;
-  _epd->getTextBounds(str, 0, 0, &x1, &y1, &tw, &th);
-  _epd->setCursor(epd_map_x(s_log_x, (int)tw), epd_map_y(s_log_y));
-  s_log_x += (int)tw; /* advance logical cursor like GFX */
-#else
-  _epd->setCursor(epd_map_x(s_log_x), epd_map_y(s_log_y));
-#endif
-  _epd->print(str);
+  _canvas->setCursor(_cursor_x, _cursor_y);
+  _canvas->setTextColor(_curr_color);
+  _canvas->print(str);
+  _cursor_x = _canvas->getCursorX();
+  _cursor_y = _canvas->getCursorY();
 }
 
-void W20ShellEpdDisplay::fillRect(int x, int y, int w, int h) {
-  if (!_epd) return;
+void W20ShellEpdDisplay::fillRect(int x, int y, int w, int h)
+{
+  if (!_canvas) return;
   _crc.update<int>(x);
   _crc.update<int>(y);
   _crc.update<int>(w);
@@ -146,11 +145,12 @@ void W20ShellEpdDisplay::fillRect(int x, int y, int w, int h) {
   const int py = (int)(y * scale_y);
   const int pw = (int)(w * scale_x);
   const int ph = (int)(h * scale_y);
-  _epd->fillRect(epd_map_x(px, pw), epd_map_y(py, ph), pw, ph, _curr_color);
+  _canvas->fillRect(px, py, pw, ph, _curr_color);
 }
 
-void W20ShellEpdDisplay::drawRect(int x, int y, int w, int h) {
-  if (!_epd) return;
+void W20ShellEpdDisplay::drawRect(int x, int y, int w, int h)
+{
+  if (!_canvas) return;
   _crc.update<int>(x);
   _crc.update<int>(y);
   _crc.update<int>(w);
@@ -159,11 +159,12 @@ void W20ShellEpdDisplay::drawRect(int x, int y, int w, int h) {
   const int py = (int)(y * scale_y);
   const int pw = (int)(w * scale_x);
   const int ph = (int)(h * scale_y);
-  _epd->drawRect(epd_map_x(px, pw), epd_map_y(py, ph), pw, ph, _curr_color);
+  _canvas->drawRect(px, py, pw, ph, _curr_color);
 }
 
-void W20ShellEpdDisplay::drawXbm(int x, int y, const uint8_t *bits, int w, int h) {
-  if (!_epd || !bits) return;
+void W20ShellEpdDisplay::drawXbm(int x, int y, const uint8_t *bits, int w, int h)
+{
+  if (!_canvas || !bits) return;
   _crc.update<int>(x);
   _crc.update<int>(y);
   _crc.update<int>(w);
@@ -182,30 +183,56 @@ void W20ShellEpdDisplay::drawXbm(int x, int y, const uint8_t *bits, int w, int h
       uint16_t byteOffset = (by * widthInBytes) + (bx / 8);
       uint8_t bitMask = 0x80 >> (bx & 7);
       if (bits[byteOffset] & bitMask) {
-        _epd->fillRect(epd_map_x(x1, block_w), epd_map_y(y1, block_h), block_w, block_h, _curr_color);
+        _canvas->fillRect(x1, y1, block_w, block_h, _curr_color);
       }
     }
   }
 }
 
-uint16_t W20ShellEpdDisplay::getTextWidth(const char *str) {
-  if (!_epd || !str) return 0;
+uint16_t W20ShellEpdDisplay::getTextWidth(const char *str)
+{
+  if (!_canvas || !str) return 0;
   int16_t x1, y1;
   uint16_t w, h;
-  _epd->getTextBounds(str, 0, 0, &x1, &y1, &w, &h);
+  _canvas->getTextBounds(str, 0, 0, &x1, &y1, &w, &h);
   return (uint16_t)ceil((w + 1) / scale_x);
 }
 
-void W20ShellEpdDisplay::endFrame() {
-  if (!_epd || !_isOn) {
+void W20ShellEpdDisplay::endFrame()
+{
+  if (!_epd || !_canvas || !_isOn) {
     if (_epd) w20_deckpro_epd_unlock();
     return;
   }
-  uint32_t crc = _crc.finalize();
-  if (crc != (uint32_t)_last_crc) {
-    _epd->display(false); // DEPG0310: full refresh only
-    w20_deckpro_epd_after_refresh();
-    _last_crc = (int)crc;
+
+  const uint32_t crc = _crc.finalize();
+  if (crc == (uint32_t)_last_crc) {
+    w20_deckpro_epd_unlock();
+    return;
   }
+
+  /*
+   * 对齐 w20_meshtastic EInkDisplay2 W20 分支：
+   *   drawPixel(x, (H-1)-y)  — 与 Deck disp_flush（FLIP_Y=0）同向
+   */
+  _epd->setRotation(0);
+  _epd->setFullWindow();
+  _epd->firstPage();
+  do {
+    for (uint16_t y = 0; y < EINK_HEIGHT; y++) {
+      for (uint16_t x = 0; x < EINK_WIDTH; x++) {
+        const bool on = _canvas->getPixel(x, y);
+#if W20_MESHCORE_BLIT_MIRROR_Y
+        const uint16_t dy = (uint16_t)((EINK_HEIGHT - 1) - y);
+#else
+        const uint16_t dy = y;
+#endif
+        _epd->drawPixel((int16_t)x, (int16_t)dy, on ? GxEPD_BLACK : GxEPD_WHITE);
+      }
+    }
+  } while (_epd->nextPage());
+
+  w20_deckpro_epd_after_refresh();
+  _last_crc = (int)crc;
   w20_deckpro_epd_unlock();
 }

@@ -2,7 +2,10 @@
 
 #if defined(W20_MESHNOLOGY)
 
-/** Register CW2217 (UI%) + IP5356 (charge/VBUS/current) as HasBatteryLevel. */
+/**
+ * Register CW2217 (UI%) + IP5356 (charge/VBUS/current) as HasBatteryLevel.
+ * 开机打印 [PWR] 复位原因 + RTC last_alive，用于区分棕断/整轨掉电/看门狗。
+ */
 bool w20PowerBatteryInit(void);
 
 /** 运行期 IP5356 从 SKIPPED 变为 OK 后调用：补注册电量并刷新充电状态。 */

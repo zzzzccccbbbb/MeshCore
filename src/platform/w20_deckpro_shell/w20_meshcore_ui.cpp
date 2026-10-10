@@ -31,8 +31,7 @@ void w20_meshcore_ui_on_enter(void) {
     ui_task.begin(s_disp, s_sensors, s_prefs);
     s_begun = true;
   } else {
-    /* Re-apply MeshCore 180° each enter (Deck may have reset rotation). */
-    epd->begin(); /* idempotent: sets rotation on shared GxEPD2 */
+    epd->begin();
   }
   s_on_mesh_page = true;
   if (!s_disp->isOn()) s_disp->turnOn();

@@ -11,6 +11,10 @@
 #if USE_CW2217_GAUGE
 #include "w20_cw2217.h"
 #endif
+#if defined(ARDUINO_ARCH_ESP32)
+#include <esp_system.h>
+#include "rom/rtc.h"
+#endif
 
 /** KEY 持续低：IP5356 可能休眠；影响 LUT 选表，不强制改 UI%。 */
 static bool s_key_sleep_mode = false;
@@ -691,8 +695,91 @@ class W20BatteryLevel : public HasBatteryLevel
 
 static W20BatteryLevel s_battery;
 
+#if defined(ARDUINO_ARCH_ESP32)
+/** 跨复位保留（棕断/WDT 常能保住；整轨掉电/USB 塌通常清掉）→ 用来区分供电切断 vs 软件挂死。 */
+#define W20_PWR_ALIVE_MAGIC 0x57425052u /* 'WBPR' */
+typedef struct {
+    uint32_t magic;
+    uint32_t millis;
+    int16_t ui_pct;
+    int16_t vbat_mv;
+    uint8_t key_sleep;
+    uint8_t pad[3];
+} w20_pwr_alive_t;
+RTC_NOINIT_ATTR static w20_pwr_alive_t s_pwr_alive;
+
+static const char *w20_esp_rst_name(esp_reset_reason_t r)
+{
+    switch (r) {
+    case ESP_RST_POWERON:
+        return "POWERON";
+    case ESP_RST_EXT:
+        return "EXT";
+    case ESP_RST_SW:
+        return "SW";
+    case ESP_RST_PANIC:
+        return "PANIC";
+    case ESP_RST_INT_WDT:
+        return "INT_WDT";
+    case ESP_RST_TASK_WDT:
+        return "TASK_WDT";
+    case ESP_RST_WDT:
+        return "WDT";
+    case ESP_RST_DEEPSLEEP:
+        return "DEEPSLEEP";
+    case ESP_RST_BROWNOUT:
+        return "BROWNOUT";
+    case ESP_RST_SDIO:
+        return "SDIO";
+    default:
+        return "OTHER";
+    }
+}
+
+static void w20_pwr_diag_boot_log(void)
+{
+    const esp_reset_reason_t er = esp_reset_reason();
+    const RESET_REASON hw0 = rtc_get_reset_reason(0);
+    const bool had = (s_pwr_alive.magic == W20_PWR_ALIVE_MAGIC);
+
+    /* 不跟 W20_LOG_BAT：掉电后重连串口必须立刻能看见。ESP32 Arduino 无 ESP.getResetReason()。 */
+    Serial.printf("[PWR] boot esp_rst=%d(%s) rtc0=%d\n", (int)er, w20_esp_rst_name(er), (int)hw0);
+    if (had) {
+        Serial.printf("[PWR] last_alive t=%lums ui=%d%% vbat=%dmV key_sleep=%d (RTC kept)\n",
+                      (unsigned long)s_pwr_alive.millis, (int)s_pwr_alive.ui_pct, (int)s_pwr_alive.vbat_mv,
+                      (int)s_pwr_alive.key_sleep);
+    } else {
+        Serial.println(F("[PWR] last_alive none (RTC wiped)"));
+    }
+
+    if (er == ESP_RST_BROWNOUT || hw0 == RTCWDT_BROWN_OUT_RESET) {
+        Serial.println(F("[PWR] VERDICT: BROWNOUT — supply sag under wireless charge/discharge"));
+    } else if (er == ESP_RST_TASK_WDT || er == ESP_RST_INT_WDT || er == ESP_RST_WDT) {
+        Serial.println(F("[PWR] VERDICT: WATCHDOG — software hang then reset"));
+    } else if (!had && (er == ESP_RST_POWERON || er == ESP_RST_UNKNOWN)) {
+        Serial.println(F("[PWR] VERDICT: COLD POWER-ON / hard rail cut (USB drop fits this)"));
+    } else if (had) {
+        Serial.println(F("[PWR] VERDICT: reset with RTC retained — see esp_rst above"));
+    } else {
+        Serial.println(F("[PWR] VERDICT: unclear — see esp_rst / rtc0 above"));
+    }
+}
+
+static void w20_pwr_alive_kick(void)
+{
+    s_pwr_alive.magic = W20_PWR_ALIVE_MAGIC;
+    s_pwr_alive.millis = millis();
+    s_pwr_alive.ui_pct = (int16_t)(s_ui_display >= 0 ? s_ui_display : -1);
+    s_pwr_alive.vbat_mv = (int16_t)((s_last_good_vbat_mv > 0 && s_last_good_vbat_mv < 32767) ? s_last_good_vbat_mv : -1);
+    s_pwr_alive.key_sleep = s_key_sleep_mode ? 1 : 0;
+}
+#endif /* ARDUINO_ARCH_ESP32 */
+
 bool w20PowerBatteryInit(void)
 {
+#if defined(ARDUINO_ARCH_ESP32)
+    w20_pwr_diag_boot_log();
+#endif
     const bool ip = w20_ip5356_boot_init();
 #if USE_CW2217_GAUGE
     const bool cw = w20_cw2217_boot_init();
@@ -704,6 +791,9 @@ bool w20PowerBatteryInit(void)
 #endif
     powerSetBatteryLevel(&s_battery);
     powerRefreshStatus();
+#if defined(ARDUINO_ARCH_ESP32)
+    w20_pwr_alive_kick();
+#endif
     return true;
 }
 
@@ -718,6 +808,16 @@ void w20_power_battery_on_ip5356_ready(void)
 
 void w20_battery_dual_soc_log_poll(void)
 {
+#if defined(ARDUINO_ARCH_ESP32)
+    {
+        static uint32_t s_alive_ms = 0;
+        const uint32_t now_alive = millis();
+        if (s_alive_ms == 0 || (uint32_t)(now_alive - s_alive_ms) >= 1000u) {
+            s_alive_ms = now_alive;
+            w20_pwr_alive_kick();
+        }
+    }
+#endif
 #if W20_LOG_BAT
     static uint32_t s_hb_ms = 0;
     static uint32_t s_cal_ms = 0;

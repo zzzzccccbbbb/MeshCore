@@ -3,6 +3,7 @@
 #include <helpers/ui/DisplayDriver.h>
 #include <GxEPD2_BW.h>
 #include <gdeq/GxEPD2_310_DEPG0310BxU253.h>
+#include <Adafruit_GFX.h>
 #include <Fonts/FreeSans9pt7b.h>
 #include <Fonts/FreeSansBold12pt7b.h>
 #include <Fonts/FreeSans18pt7b.h>
@@ -17,16 +18,20 @@
 #endif
 
 /**
- * MeshCore DisplayDriver that paints onto the Deck Pro shell's shared GxEPD2 instance
- * (HSPI / DEPG0310). Do not call begin() before w20_deckpro_shell_init().
+ * MeshCore DisplayDriver on Deck shared GxEPD2.
+ * Draw linearly into GFXcanvas1, blit with Y-mirror like w20_meshtastic EInkDisplay2
+ * (matches Deck disp_flush when W20_DECKPRO_FLIP_Y=0).
  */
 class W20ShellEpdDisplay : public DisplayDriver {
   using DeckEpd = GxEPD2_BW<GxEPD2_310_DEPG0310BxU253, GxEPD2_310_DEPG0310BxU253::HEIGHT>;
   DeckEpd *_epd = nullptr;
+  GFXcanvas1 *_canvas = nullptr;
   bool _isOn = false;
-  uint16_t _curr_color = GxEPD_BLACK;
+  uint16_t _curr_color = 1; /* canvas: 1=black */
   CRC32 _crc;
   int _last_crc = 0;
+  int _cursor_x = 0;
+  int _cursor_y = 0;
   const float scale_x = EINK_SCALE_X;
   const float scale_y = EINK_SCALE_Y;
 
@@ -34,7 +39,6 @@ public:
   W20ShellEpdDisplay() : DisplayDriver(128, 128) {}
 
   bool begin();
-  /** Restore Deck LVGL rotation (0) after leaving Mesh page. */
   void restoreDeckRotation();
   bool isOn() override { return _isOn; }
   bool isEink() override { return true; }
@@ -53,3 +57,8 @@ public:
   uint16_t getTextWidth(const char *str) override;
   void endFrame() override;
 };
+
+/** Touch/back hit helpers: Mesh uses Deck-aligned orientation (no software FLIP). */
+bool w20_shell_epd_flip_x(void);
+bool w20_shell_epd_flip_y(void);
+uint8_t w20_shell_epd_rotation(void);

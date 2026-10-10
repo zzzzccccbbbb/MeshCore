@@ -572,7 +572,7 @@ void ui_wifi_menu_session_begin(void)
     s_wifiMenuSessionActive = true;
     ui_wifi_pause_ble_for_radio();
     w20_wifi_suspend_meshtastic_reconnect();
-    W20_WIFI_LOGLN("[W20UI] WiFi menu session begin (Meshtastic reconnect suspended)");
+    W20_WIFI_LOGLN("[W20UI] WiFi menu session begin (BLE paused / auto-reconnect suspended)");
 }
 
 void ui_wifi_menu_session_end(bool sta_connected_with_ip)

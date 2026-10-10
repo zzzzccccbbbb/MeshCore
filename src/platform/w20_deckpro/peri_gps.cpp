@@ -226,78 +226,32 @@ void gps_disable_for_screen(void)
 /* clang-format on */
 void displayInfo()
 {
-    Serial.print(F("Location: "));
-    if (deck_gps.location.isValid())
-    {
+    if (deck_gps.location.isValid()) {
         gps_fix_valid = true;
         gps_lat = deck_gps.location.lat();
         gps_lng = deck_gps.location.lng();
-        Serial.print(gps_lat, 6);
-        Serial.print(F(","));
-        Serial.print(gps_lng, 6);
-    }
-    else
-    {
+    } else {
         gps_fix_valid = false;
-        Serial.print(F("INVALID"));
     }
 
-    Serial.print(F("  Date/Time: "));
-    if (deck_gps.date.isValid())
-    {
+    if (deck_gps.date.isValid()) {
         gps_year = deck_gps.date.year();
         gps_month = deck_gps.date.month();
         gps_day = deck_gps.date.day();
-        Serial.print(gps_month);
-        Serial.print(F("/"));
-        Serial.print(gps_day);
-        Serial.print(F("/"));
-        Serial.print(gps_year);
-    }
-    else
-    {
-        Serial.print(F("INVALID"));
     }
 
-    Serial.print(F(" "));
-    if (deck_gps.time.isValid())
-    {
+    if (deck_gps.time.isValid()) {
         gps_hour = deck_gps.time.hour();
         gps_minute = deck_gps.time.minute();
         gps_second = deck_gps.time.second();
-
-        if (gps_hour < 10)
-            Serial.print(F("0"));
-        Serial.print(gps_hour);
-        Serial.print(F(":"));
-        if (gps_minute < 10)
-            Serial.print(F("0"));
-        Serial.print(gps_minute);
-        Serial.print(F(":"));
-        if (gps_second < 10)
-            Serial.print(F("0"));
-        Serial.print(gps_second);
-        Serial.print(F("."));
-    }
-    else
-    {
-        Serial.print(F("INVALID"));
     }
 
-    Serial.print(F("  Satellites: "));
-    if(deck_gps.satellites.isValid())
-    {
+    if (deck_gps.satellites.isValid()) {
         gps_vsat = deck_gps.satellites.value();
-        Serial.print(gps_vsat);
-        Serial.print(F(" "));
     }
 
-    Serial.print(F("  Speed: "));
-    if(deck_gps.speed.isValid())
-    {
+    if (deck_gps.speed.isValid()) {
         gps_speed = deck_gps.speed.kmph();
-        Serial.print(gps_speed);
-        Serial.print(F(" "));
     }
 
     if (deck_gps.altitude.isValid()) {
@@ -310,7 +264,7 @@ void displayInfo()
         gps_hdop = deck_gps.hdop.hdop();
     }
 
-    Serial.println();
+    /* 默认不打 Location: INVALID 刷屏；需要时开 W20_LOG_GPS */
     W20_GPS_LOG("[GPS-Deck] NMEA parsed fix=%d sats=%lu lat=%.5f lon=%.5f\r\n", gps_fix_valid ? 1 : 0,
                 (unsigned long)gps_vsat, gps_lat, gps_lng);
 }
