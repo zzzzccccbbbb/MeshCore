@@ -7,7 +7,7 @@
  */
 #pragma once
 
-#define UI_T_DECK_PRO_VERSION    "v1.3-261014D"  // Software version
+#define UI_T_DECK_PRO_VERSION    "v1.3-261014E"  // Software version
 #define BOARD_T_DECK_PRO_VERSION "v2.0-260812"  // Hardware version
 
 // Serial
@@ -399,6 +399,27 @@
 /** 兼容旧名：电压 hold 与 FAILSAFE_HOLD 相同。 */
 #ifndef W20_BAT_SHUTDOWN_PCT_HOLD_MS
 #define W20_BAT_SHUTDOWN_PCT_HOLD_MS W20_BAT_SHUTDOWN_FAILSAFE_HOLD_MS
+#endif
+/**
+ * 棕断弱电锁存（打断 BROWNOUT 闪屏环）：
+ * - 棕断复位且 last_alive 电压偏低 → 记录 latch，开机走低电关机页 + deep sleep
+ * - 锁存期间每次启动都进低电路径，直到充电/VBUS 或电压明显回升后清除
+ * - 学到的电压 + MARGIN 作为 latch_mv（日志/可选运行期参考）；关机判定以 locked 为主
+ */
+#ifndef W20_BAT_BOD_LATCH
+#define W20_BAT_BOD_LATCH 1
+#endif
+/** 仅当 last_alive VBAT ≤ 该值才学习（防无线高电棕断误学）。 */
+#ifndef W20_BAT_BOD_LEARN_MAX_MV
+#define W20_BAT_BOD_LEARN_MAX_MV 3550
+#endif
+/** latch_mv = learned + MARGIN，并封顶 LEARN_MAX+MARGIN。 */
+#ifndef W20_BAT_BOD_LATCH_MARGIN_MV
+#define W20_BAT_BOD_LATCH_MARGIN_MV 80
+#endif
+/** IP 不可用时：当前 VBAT ≥ 该值视为已充电/恢复，清除锁存。 */
+#ifndef W20_BAT_BOD_CLEAR_MIN_MV
+#define W20_BAT_BOD_CLEAR_MIN_MV 3600
 #endif
 /**
  * GPIO10 KEY 持续为低达到该时长 → 判定 IP6802 进入电池路径（IP5356 可能休眠）。

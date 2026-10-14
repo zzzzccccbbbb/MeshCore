@@ -108,7 +108,14 @@ void setup() {
                 digitalRead(P_LORA_EN), digitalRead(P_LORA_NSS));
 #endif
 
+#if defined(MESHNOLOGY_W20)
+  /* Wire 尽早：棕断弱电门禁需读 CW/IP；正常路径供 radio_init RTC */
+  Wire.begin(PIN_BOARD_SDA, PIN_BOARD_SCL);
+#endif
+
 #if defined(USE_W20_DECKPRO_SHELL)
+  /* 棕断锁存：刷 Low battery off 后 deep sleep，打断闪屏环（不返回） */
+  w20_deckpro_boot_lowbatt_halt_if_needed();
   /* 极早 splash（与 meshtastic W20 一致），再做射频/mesh 长初始化 */
   w20_deckpro_early_splash();
 #endif
@@ -120,8 +127,6 @@ void setup() {
   pinMode(P_LORA_RESET, OUTPUT);
   digitalWrite(P_LORA_RESET, HIGH);
   pinMode(P_LORA_BUSY, INPUT_PULLUP);
-  /* Wire for RTC inside radio_init(); board.begin() must not steal NSS after HAL. */
-  Wire.begin(PIN_BOARD_SDA, PIN_BOARD_SCL);
   const bool radio_ok = radio_init();
   if (!radio_ok) {
     Serial.printf("WARNING: radio_init failed; EN=%d continuing Deck without Mesh RF\n",

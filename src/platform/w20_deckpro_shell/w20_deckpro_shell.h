@@ -58,6 +58,11 @@ void w20_deckpro_present_menu_on_epd(void);
  * 与后续 shell 共用同一 GxEPD2 实例；UI 侧跳过 SCREEN12 避免重复。
  */
 void w20_deckpro_early_splash(void);
+/**
+ * 棕断弱电锁存门禁（Wire 须已 begin）：若应关机则刷「Low battery off」并 deep sleep（不返回）。
+ * 须在 early_splash / radio_init 之前调用，避免闪屏环。
+ */
+void w20_deckpro_boot_lowbatt_halt_if_needed(void);
 /** Sleep 进睡前：FULL 刷 img_start + 底部 Sleep 文案，再 powerOff 保画面。 */
 void w20_deckpro_sleep_prompt_flush(void);
 

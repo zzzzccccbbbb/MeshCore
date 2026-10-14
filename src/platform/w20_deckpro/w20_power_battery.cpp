@@ -1154,7 +1154,20 @@ typedef struct {
 } w20_pwr_alive_t;
 RTC_NOINIT_ATTR static w20_pwr_alive_t s_pwr_alive;
 
+#if W20_BAT_BOD_LATCH
+/** 棕断弱电锁存：跨 BROWNOUT/deep-sleep 保留，充电清除。 */
+#define W20_BOD_LATCH_MAGIC 0x57424F44u /* 'WBOD' */
+typedef struct {
+    uint32_t magic;
+    uint16_t latch_mv;   /* learned + margin */
+    int16_t learned_mv;  /* 棕断前 last_alive VBAT */
+    uint8_t locked;      /* 1=弱电锁存有效 */
+    uint8_t pad[3];
+} w20_bod_latch_t;
+RTC_NOINIT_ATTR static w20_bod_latch_t s_bod_latch;
+#endif
 
+static bool s_pwr_diag_logged = false;
 
 static const char *w20_esp_rst_name(esp_reset_reason_t r)
 {
@@ -1186,6 +1199,10 @@ static const char *w20_esp_rst_name(esp_reset_reason_t r)
 
 static void w20_pwr_diag_boot_log(void)
 {
+    if (s_pwr_diag_logged)
+        return;
+    s_pwr_diag_logged = true;
+
     const esp_reset_reason_t er = esp_reset_reason();
     const RESET_REASON hw0 = rtc_get_reset_reason(0);
     const bool had = (s_pwr_alive.magic == W20_PWR_ALIVE_MAGIC);
@@ -1212,6 +1229,12 @@ static void w20_pwr_diag_boot_log(void)
         Serial.println(F("[PWR] VERDICT: unclear — see esp_rst / rtc0 above"));
     }
 
+#if W20_BAT_BOD_LATCH
+    if (s_bod_latch.magic == W20_BOD_LATCH_MAGIC && s_bod_latch.locked) {
+        Serial.printf("[PWR] bod_latch ON learned=%dmV latch<=%dmV\n", (int)s_bod_latch.learned_mv,
+                      (int)s_bod_latch.latch_mv);
+    }
+#endif
 }
 
 static void w20_pwr_alive_kick(void)
@@ -1222,8 +1245,156 @@ static void w20_pwr_alive_kick(void)
     s_pwr_alive.vbat_mv = (int16_t)((s_last_good_vbat_mv > 0 && s_last_good_vbat_mv < 32767) ? s_last_good_vbat_mv : -1);
     s_pwr_alive.key_sleep = s_key_sleep_mode ? 1 : 0;
 }
+
+#if W20_BAT_BOD_LATCH
+static bool w20_bod_latch_valid(void)
+{
+    return s_bod_latch.magic == W20_BOD_LATCH_MAGIC && s_bod_latch.locked != 0;
+}
+
+static void w20_bod_latch_clear(const char *why)
+{
+    if (!w20_bod_latch_valid()) {
+        s_bod_latch.magic = 0;
+        s_bod_latch.locked = 0;
+        return;
+    }
+    Serial.printf("[PWR] bod_latch CLEAR (%s) was learned=%dmV latch=%dmV\n", why ? why : "?",
+                  (int)s_bod_latch.learned_mv, (int)s_bod_latch.latch_mv);
+    s_bod_latch.magic = 0;
+    s_bod_latch.locked = 0;
+    s_bod_latch.latch_mv = 0;
+    s_bod_latch.learned_mv = -1;
+}
+
+static void w20_bod_latch_learn(int learned_mv)
+{
+    int latch = learned_mv + (int)W20_BAT_BOD_LATCH_MARGIN_MV;
+    const int cap = (int)W20_BAT_BOD_LEARN_MAX_MV + (int)W20_BAT_BOD_LATCH_MARGIN_MV;
+    if (latch > cap)
+        latch = cap;
+    if (latch < (int)W20_BAT_SHUTDOWN_FAILSAFE_MV)
+        latch = (int)W20_BAT_SHUTDOWN_FAILSAFE_MV;
+
+    s_bod_latch.magic = W20_BOD_LATCH_MAGIC;
+    s_bod_latch.locked = 1;
+    s_bod_latch.learned_mv = (int16_t)learned_mv;
+    s_bod_latch.latch_mv = (uint16_t)latch;
+    Serial.printf("[PWR] bod_latch LEARN v=%dmV -> latch<=%dmV (halt until charge)\n", learned_mv, latch);
+}
+
+static bool w20_battery_probe_powered(void)
+{
+    if (w20_ip5356_is_present()) {
+        IP5356::Status st;
+        if (w20_ip5356_read_status(st) && (st.inputPresent || st.charging))
+            return true;
+    }
+    return false;
+}
+
+static int w20_battery_probe_vbat_quick(void)
+{
+#if USE_CW2217_GAUGE
+    if (w20_cw2217_is_present()) {
+        const int mv = w20_cw2217_read_voltage_mv();
+        if (mv >= (int)W20_BAT_CW_VALID_MIN_MV)
+            return mv;
+    }
+#endif
+    if (w20_ip5356_is_present()) {
+        const int mv = w20_ip5356_read_voltage_mv();
+        if (mv >= (int)W20_BAT_IP_VALID_MIN_MV)
+            return mv;
+    }
+    return -1;
+}
+
+static void w20_bod_latch_try_clear(int cur_mv, bool powered)
+{
+    if (!w20_bod_latch_valid())
+        return;
+    if (powered) {
+        w20_bod_latch_clear("charge/vbus");
+        return;
+    }
+    if (cur_mv >= (int)W20_BAT_BOD_CLEAR_MIN_MV) {
+        w20_bod_latch_clear("vbat recovered");
+        return;
+    }
+}
+#endif /* W20_BAT_BOD_LATCH */
 #endif /* ARDUINO_ARCH_ESP32 */
 
+bool w20_battery_brownout_latch_active(void)
+{
+#if defined(ARDUINO_ARCH_ESP32) && W20_BAT_BOD_LATCH
+    return w20_bod_latch_valid();
+#else
+    return false;
+#endif
+}
+
+void w20_battery_brownout_latch_poll_clear_on_charge(void)
+{
+#if defined(ARDUINO_ARCH_ESP32) && W20_BAT_BOD_LATCH
+    if (!w20_bod_latch_valid())
+        return;
+    const bool powered = w20_battery_probe_powered();
+    const int mv = w20_battery_read_vbat_mv();
+    w20_bod_latch_try_clear(mv, powered);
+#endif
+}
+
+bool w20_battery_boot_lowbatt_should_halt(void)
+{
+#if !(defined(ARDUINO_ARCH_ESP32) && W20_BAT_BOD_LATCH)
+    return false;
+#else
+    w20_pwr_diag_boot_log();
+
+    /* 轻量探测：CW 电压 + IP 充电态（失败不阻塞） */
+#if USE_CW2217_GAUGE
+    (void)w20_cw2217_boot_init();
+#endif
+#if USE_IP5356_CHARGER
+    (void)w20_ip5356_boot_init();
+#endif
+
+    const int cur_mv = w20_battery_probe_vbat_quick();
+    if (cur_mv > 0)
+        s_last_good_vbat_mv = cur_mv;
+
+    const bool powered = w20_battery_probe_powered();
+    w20_bod_latch_try_clear(cur_mv, powered);
+    if (powered) {
+        Serial.printf("[PWR] lowbatt gate: powered, skip halt (v=%dmV)\n", cur_mv);
+        return false;
+    }
+
+    const esp_reset_reason_t er = esp_reset_reason();
+    const RESET_REASON hw0 = rtc_get_reset_reason(0);
+    const bool is_bod = (er == ESP_RST_BROWNOUT || hw0 == RTCWDT_BROWN_OUT_RESET);
+    const bool had_alive = (s_pwr_alive.magic == W20_PWR_ALIVE_MAGIC);
+    const int last_mv = had_alive ? (int)s_pwr_alive.vbat_mv : -1;
+    const int last_ui = had_alive ? (int)s_pwr_alive.ui_pct : -1;
+
+    if (is_bod && last_mv >= (int)W20_BAT_CW_VALID_MIN_MV && last_mv <= (int)W20_BAT_BOD_LEARN_MAX_MV) {
+        /* 电压已偏低，或 UI 已见底：学习锁存 */
+        if (last_ui <= 1 || last_mv <= (int)W20_BAT_BOD_LEARN_MAX_MV) {
+            w20_bod_latch_learn(last_mv);
+        }
+    }
+
+    if (!w20_bod_latch_valid())
+        return false;
+
+    /* 锁存有效且未充电：一律走低电关机（打断闪屏环） */
+    Serial.printf("[PWR] lowbatt gate HALT locked latch=%dmV cur=%dmV learned=%dmV\n",
+                  (int)s_bod_latch.latch_mv, cur_mv, (int)s_bod_latch.learned_mv);
+    return true;
+#endif
+}
 
 bool w20PowerBatteryInit(void)
 {
@@ -1243,6 +1414,9 @@ bool w20PowerBatteryInit(void)
     powerRefreshStatus();
 #if defined(ARDUINO_ARCH_ESP32)
     w20_pwr_alive_kick();
+#if W20_BAT_BOD_LATCH
+    w20_battery_brownout_latch_poll_clear_on_charge();
+#endif
 #endif
     return true;
 }
@@ -1253,6 +1427,9 @@ void w20_power_battery_on_ip5356_ready(void)
         return;
     powerSetBatteryLevel(&s_battery);
     powerRefreshStatus();
+#if defined(ARDUINO_ARCH_ESP32) && W20_BAT_BOD_LATCH
+    w20_battery_brownout_latch_poll_clear_on_charge();
+#endif
     LOG_INFO("IP5356 late-ready: battery provider refreshed");
 }
 
@@ -1267,6 +1444,16 @@ void w20_battery_dual_soc_log_poll(void)
             w20_pwr_alive_kick();
         }
     }
+#if W20_BAT_BOD_LATCH
+    {
+        static uint32_t s_bod_clr_ms = 0;
+        const uint32_t now_clr = millis();
+        if (s_bod_clr_ms == 0 || (uint32_t)(now_clr - s_bod_clr_ms) >= 2000u) {
+            s_bod_clr_ms = now_clr;
+            w20_battery_brownout_latch_poll_clear_on_charge();
+        }
+    }
+#endif
 #endif
 #if W20_LOG_BAT
     static uint32_t s_hb_ms = 0;

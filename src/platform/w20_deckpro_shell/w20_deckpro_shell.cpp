@@ -531,6 +531,46 @@ void w20_deckpro_early_splash(void)
     Serial.printf("[W20] early splash img_start done %lums\n", (unsigned long)(millis() - t0));
 }
 
+/** 开机棕断页：img_start + Font_Mono_Bold_19「Low battery off」（与 SCREEN9 Timed 同版式）。 */
+static void w20_deckpro_lowbatt_off_flush(void);
+
+void w20_deckpro_boot_lowbatt_halt_if_needed(void)
+{
+    if (!w20_battery_boot_lowbatt_should_halt())
+        return;
+
+    Serial.println(F("[PWR] lowbatt halt: page + deep sleep (no wake)"));
+    w20_deckpro_lowbatt_off_flush();
+
+    /* 关射频/GPS 轨；EPD 已 powerOff 保画面，勿再 hibernate */
+    pinMode(BOARD_LORA_EN, OUTPUT);
+    digitalWrite(BOARD_LORA_EN, LOW);
+    if (BOARD_GPS_EN >= 0) {
+        pinMode(BOARD_GPS_EN, OUTPUT);
+        digitalWrite(BOARD_GPS_EN, LOW);
+    }
+    if (BOARD_GPS_WAKE >= 0) {
+        pinMode(BOARD_GPS_WAKE, OUTPUT);
+        digitalWrite(BOARD_GPS_WAKE, LOW);
+    }
+
+    factory_epd_release_bus();
+    (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+    (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_EXT0);
+    (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_EXT1);
+#if defined(ESP_SLEEP_WAKEUP_TOUCHPAD)
+    (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TOUCHPAD);
+#endif
+#if defined(ESP_SLEEP_WAKEUP_ULP)
+    (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ULP);
+#endif
+#if defined(ESP_SLEEP_WAKEUP_GPIO)
+    (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+#endif
+    esp_deep_sleep_start();
+    /* not reached */
+}
+
 void w20_deckpro_sleep_prompt_flush(void)
 {
     if (!s_deck_epd_hw_ready) {
@@ -967,6 +1007,85 @@ static void disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_
     }
 
     lv_disp_flush_ready(disp_drv);
+}
+
+/** 开机棕断：一次性 LVGL 刷 img_start + 底部文案，版式对齐 Timed Shutdown / Sleep。 */
+static void w20_deckpro_lowbatt_off_flush(void)
+{
+    const uint32_t t0 = millis();
+    pinMode(BOARD_LORA_CS, OUTPUT);
+    digitalWrite(BOARD_LORA_CS, HIGH);
+    pinMode(BOARD_EPD_CS, OUTPUT);
+    digitalWrite(BOARD_EPD_CS, HIGH);
+
+    if (!ink_screen_init_hsipi()) {
+        Serial.println("[W20] lowbatt flush: EPD init fail");
+        return;
+    }
+
+    lv_init();
+
+    static lv_disp_draw_buf_t draw_buf_dsc;
+    lv_color_t *lv_buf = (lv_color_t *)ps_calloc(sizeof(lv_color_t), (size_t)LCD_HOR_SIZE * 8);
+    if (lv_buf == nullptr) {
+        static lv_color_t lv_buf_fallback[LCD_HOR_SIZE * 2];
+        lv_buf = lv_buf_fallback;
+        lv_disp_draw_buf_init(&draw_buf_dsc, lv_buf, nullptr, LCD_HOR_SIZE * 2);
+    } else {
+        lv_disp_draw_buf_init(&draw_buf_dsc, lv_buf, nullptr, LCD_HOR_SIZE * 8);
+    }
+
+    const size_t dbuf_bytes = ((size_t)LCD_HOR_SIZE * (size_t)LCD_VER_SIZE + 7) / 8;
+    if (decodebuffer == nullptr) {
+        decodebuffer = (uint8_t *)ps_calloc(1, dbuf_bytes);
+        if (decodebuffer == nullptr) {
+            static uint8_t decodebuffer_static[(LCD_HOR_SIZE * LCD_VER_SIZE + 7) / 8];
+            decodebuffer = decodebuffer_static;
+        }
+    }
+    memset(decodebuffer, 0xFF, dbuf_bytes);
+
+    static lv_disp_drv_t disp_drv;
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res = LCD_HOR_SIZE;
+    disp_drv.ver_res = LCD_VER_SIZE;
+    disp_drv.flush_cb = disp_flush;
+    disp_drv.draw_buf = &draw_buf_dsc;
+    disp_drv.full_refresh = 1;
+    lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
+    if (disp == nullptr) {
+        Serial.println("[W20] lowbatt flush: lv_disp register fail");
+        return;
+    }
+
+    lv_obj_t *scr = lv_scr_act();
+    lv_obj_set_style_bg_color(scr, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(scr, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(scr, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *logo = lv_img_create(scr);
+    lv_img_set_src(logo, &img_start);
+    lv_obj_set_style_border_width(logo, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(logo, 0, LV_PART_MAIN);
+    lv_obj_align(logo, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    /* 与 SCREEN9 Timed Shutdown / Sleep 标题同：Font_Mono_Bold_19 + BOTTOM_MID -36 */
+    lv_obj_t *hint = lv_label_create(scr);
+    lv_label_set_text(hint, "Low battery off");
+    lv_obj_set_style_text_color(hint, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_text_font(hint, &Font_Mono_Bold_19, LV_PART_MAIN);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -36);
+
+    lv_obj_update_layout(scr);
+    lv_obj_invalidate(scr);
+    lv_refr_now(disp);
+
+    uint32_t elapsed = 0;
+    w20_deckpro_epd_do_flush(decodebuffer, LCD_HOR_SIZE, LCD_VER_SIZE, true, &elapsed, 0);
+    Serial.printf("[W20] lowbatt off flush done %lums (epd=%lums)\n",
+                  (unsigned long)(millis() - t0), (unsigned long)elapsed);
 }
 
 #ifndef W20_EPD_NAV_TOUCH_LOCK_MAX_MS
@@ -1460,6 +1579,7 @@ void w20_shell_suppress_menu_present_once(void) {}
 void w20_deckpro_shell_init(void) {}
 void w20_deckpro_shell_loop(void) {}
 void w20_deckpro_early_splash(void) {}
+void w20_deckpro_boot_lowbatt_halt_if_needed(void) {}
 void w20_deckpro_sleep_prompt_flush(void) {}
 
 #endif

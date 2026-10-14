@@ -52,4 +52,16 @@ bool w20_battery_charge_complete_latched(void);
 void w20_battery_auto_shutdown_poll(void);
 bool w20_battery_auto_shutdown_pending(void);
 
+/**
+ * 开机极早（Wire 已 begin）：打印 [PWR]、学习/清除棕断锁存。
+ * @return true=应立刻刷低电关机页并 deep sleep（勿再 splash/射频/UI）。
+ */
+bool w20_battery_boot_lowbatt_should_halt(void);
+
+/** 棕断弱电锁存是否有效（RTC）。 */
+bool w20_battery_brownout_latch_active(void);
+
+/** 运行中：充电/VBUS 或电压回升时清锁存。 */
+void w20_battery_brownout_latch_poll_clear_on_charge(void);
+
 #endif
