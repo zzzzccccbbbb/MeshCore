@@ -166,6 +166,15 @@ bool ui_deckpro_lvgl_touch_suppressed(void);
 void ui_deckpro_gesture_reset(void);
 /** 菜单 Sleep：切到 Mesh 页 + Screen Paused，禁用触控；Boot 单击唤醒。 */
 void ui_deckpro_enter_board_sleep(void);
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+/** 无操作定时关机到期：推 SCREEN9（与手动 Shutdown 相同，Reset 可起）。 */
+void ui_deckpro_request_auto_off_shutdown(void);
+#ifdef __cplusplus
+}
+#endif
 /** 进子菜单前：取消待刷 PART，下次 LVGL 刷新走 FULL。 */
 void ui_deckpro_epd_prepare_subscreen(void);
 /** 导航切换期间禁止墨水 flush（抬手→push 之间）；prepare_subscreen 会清除。 */

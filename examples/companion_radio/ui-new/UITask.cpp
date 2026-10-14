@@ -38,6 +38,7 @@
 
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
 #include "platform/w20_deckpro/w20_power_battery.h"
+#include "platform/w20_deckpro/w20_auto_off.h"
 #include "platform/w20_deckpro/ui_deckpro_port.h"
 extern "C" void ui_deckpro_request_shutdown_from_mesh(void);
 /** 与 ui_deckpro MESH_BACK_BTN_* 热区对应；顶边贴齐屏顶（与触控热区一致）。 */
@@ -857,6 +858,9 @@ void UITask::setCurrScreen(UIScreen* c) {
 
 void UITask::injectKey(char c) {
   if (c == 0 || !curr) return;
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+  w20_auto_off_kick();
+#endif
   if (_display != NULL && !_display->isOn()) {
     _display->turnOn();
     _next_refresh = 100;
@@ -991,6 +995,9 @@ void UITask::loop() {
 #endif
 
   if (c != 0 && curr) {
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+    w20_auto_off_kick();
+#endif
     curr->handleInput(c);
     _auto_off = millis() + AUTO_OFF_MILLIS;   // extend auto-off timer
     _next_refresh = 100;  // trigger refresh

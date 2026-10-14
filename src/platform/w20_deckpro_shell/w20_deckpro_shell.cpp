@@ -8,6 +8,7 @@
 #include "platform/w20_deckpro_shell/w20_gps_arbiter.h"
 #include "platform/w20_deckpro_shell/w20_deck_board_sleep.h"
 #include "platform/w20_deckpro/w20_wifi_ota.h"
+#include "platform/w20_deckpro/w20_auto_off.h"
 #include "graphics/EInkDisplay2.h"
 #include "graphics/Screen.h"
 #include "graphics/draw/MenuHandler.h"
@@ -1107,11 +1108,13 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
         if (s_epd_flush_done && !s_epd_nav_touch_lock) {
             s_epd_flush_pending = false;
         }
+        w20_auto_off_kick();
         W20_TOUCH_LOG("touch DOWN raw(%d,%d) lv(%d,%d) flip_y=%d\n", (int)last_x, (int)last_y, (int)data->point.x, (int)data->point.y,
                    W20_DECKPRO_FLIP_Y);
     } else if (!touched && s_log_down) {
         s_log_down = false;
         s_touch_hold_epd = false;
+        w20_auto_off_kick();
         W20_TOUCH_LOG("touch UP   raw(%d,%d) lv(%d,%d)\n", (int)last_x, (int)last_y, (int)data->point.x, (int)data->point.y);
     }
 }
@@ -1407,6 +1410,7 @@ void w20_deckpro_shell_loop(void)
         ui_input_ip5356_key_poll();
         w20_battery_dual_soc_log_poll();
         ui_deckpro_poll_low_batt_shutdown();
+        w20_auto_off_poll();
         if (!w20_shell_mesh_screen_allowed()) {
             ui_deckpro_poll_boot_shutdown();
         } else if (screen != nullptr) {

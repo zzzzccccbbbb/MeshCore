@@ -9,6 +9,7 @@
 #include "peripheral.h"
 #include "peri_power.h"
 #include "peri_lighting_led_key.h"
+#include "w20_auto_off.h"
 #include "ebook_catalog.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -36,13 +37,19 @@ void ui_deckpro_enter_board_sleep(void);
 #endif
 
 #define SETTING_PAGE_MAX_ITEM 7
-/** Setting：布局不变；仅 CLICK_EXT 调命中（RGB 小、About 大，避免互抢）。 */
-#define SETTING_ITEM_BTN_H    40
+/** Setting：显示行高/间距；触控用独立热区（不改视觉）。 */
+#define SETTING_ITEM_BTN_H    35
 #define SETTING_ITEM_PAD_ROW  8
 #define SETTING_ITEM_PAD_TOP  14
 #define SETTING_ITEM_CLICK_EXT 2
-#define SETTING_SUB_CLICK_EXT 12
-/** Test：沿用旧布局（行高 35、行间距 8），与 Setting 解耦。 */
+/** RGB：热区贴顶并裁底，避免点到 System。 */
+#define SETTING_RGB_HIT_TRIM_BOTTOM  10
+/** About System：裁下沿给 Timed；再上探吃掉 RGB 裁底+行间距死区（日志 y≈197–207）。 */
+#define SETTING_SUB_HIT_TRIM_BOTTOM  8
+#define SETTING_SUB_HIT_SHIFT_UP     12
+/** Timed：上移 = System.trim + PAD_ROW，接住 System 下沿，不深挖 System 正文。 */
+#define SETTING_TIMED_HIT_SHIFT_UP   16
+/** Test：行高 35、行间距 8。 */
 #define TEST_ITEM_BTN_H       35
 #define TEST_ITEM_PAD_ROW     8
 #define TEST_ITEM_PAD_TOP     14
@@ -971,6 +978,7 @@ static ui_setting_handle setting_handle_list[] = {
     {.name = "Power Lora",       .type=UI_SETTING_TYPE_SW,  .set_cb = ui_setting_set_lora_status,  .get_cb = ui_setting_get_lora_status},
     {.name = "RGB Status",       .type=UI_SETTING_TYPE_RGB, .set_mode_cb = ui_setting_set_rgb_mode, .get_mode_cb = ui_setting_get_rgb_mode},
     {.name = "About System",   .type=UI_SETTING_TYPE_SUB, .sub_id = SCREEN2_1_ID},
+    {.name = "Timed Shutdown", .type=UI_SETTING_TYPE_SW,  .set_cb = w20_auto_off_set_enabled,    .get_cb = w20_auto_off_get_enabled},
 };
 
 static bool setting_rgb_sync_charging(bool refresh)
@@ -1149,7 +1157,8 @@ static void setting_item_create(int curr_apge)
 
     for(int i = start; i < end; i++) {
         ui_setting_handle *h = &setting_handle_list[i];
-        
+        h->obj = NULL;
+        h->st = NULL;
 
         switch (h->type)
         {
@@ -1174,29 +1183,29 @@ static void setting_item_create(int curr_apge)
             break;
         }
 
-        // style：可视高度不变；About(SUB) 仅加大 CLICK_EXT
-        const lv_coord_t click_ext =
-            (h->type == UI_SETTING_TYPE_SUB) ? SETTING_SUB_CLICK_EXT : SETTING_ITEM_CLICK_EXT;
-        lv_obj_set_height(h->obj, SETTING_ITEM_BTN_H);
-        lv_obj_set_style_min_height(h->obj, SETTING_ITEM_BTN_H, LV_PART_MAIN);
-        lv_obj_set_style_max_height(h->obj, SETTING_ITEM_BTN_H, LV_PART_MAIN);
+        // style：仅改显示；点击交给透明热区（可裁底 / 上移，不改外框）
+        const lv_coord_t row_h = SETTING_ITEM_BTN_H;
+        lv_obj_set_height(h->obj, row_h);
+        lv_obj_set_style_min_height(h->obj, row_h, LV_PART_MAIN);
+        lv_obj_set_style_max_height(h->obj, row_h, LV_PART_MAIN);
         lv_obj_set_style_text_font(h->obj, FONT_BOLD_SIZE_15, LV_PART_MAIN);
         lv_obj_set_style_bg_color(h->obj, DECKPRO_COLOR_BG, LV_PART_MAIN);
         lv_obj_set_style_text_color(h->obj, DECKPRO_COLOR_FG, LV_PART_MAIN);
         lv_obj_set_style_border_width(h->obj, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_border_width(h->obj, 1, LV_PART_MAIN | LV_STATE_PRESSED);
+        lv_obj_set_style_radius(h->obj, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
         /* 墨水屏：按下不画 outline，避免进子页前多刷一帧当前 Setting 页 */
         lv_obj_set_style_outline_width(h->obj, 0, LV_PART_MAIN | LV_STATE_PRESSED);
-        lv_obj_set_style_radius(h->obj, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_pad_top(h->obj, 0, LV_PART_MAIN);
         lv_obj_set_style_pad_bottom(h->obj, 0, LV_PART_MAIN);
         lv_obj_set_style_pad_left(h->obj, 10, LV_PART_MAIN);
         lv_obj_set_style_pad_right(h->obj, 8, LV_PART_MAIN);
         lv_obj_set_flex_flow(h->obj, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(h->obj, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_add_flag(h->obj, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_clear_flag(h->obj, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_ext_click_area(h->obj, click_ext);
+        lv_obj_set_ext_click_area(h->obj, 0);
+        /* 允许 Timed/System 热区略超出行顶仍可点中 */
+        lv_obj_add_flag(h->obj, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
         /* list_btn 内主标题 label 也垂直居中；子控件不抢触控 */
         for (uint32_t ci = 0; ci < lv_obj_get_child_cnt(h->obj); ci++) {
             lv_obj_t *ch = lv_obj_get_child(h->obj, ci);
@@ -1211,10 +1220,49 @@ static void setting_item_create(int curr_apge)
         }
         if (h->st != NULL) {
             lv_obj_align(h->st, LV_ALIGN_RIGHT_MID, 0, 0);
-            lv_obj_add_flag(h->st, LV_OBJ_FLAG_EVENT_BUBBLE);
             lv_obj_clear_flag(h->st, LV_OBJ_FLAG_CLICKABLE);
         }
-        lv_obj_add_event_cb(h->obj, setting_scr_event, LV_EVENT_CLICKED, (void *)h);
+
+        const bool timed_sw = (h->type == UI_SETTING_TYPE_SW && h->set_cb == w20_auto_off_set_enabled);
+        const bool sub_row = (h->type == UI_SETTING_TYPE_SUB);
+        const bool rgb_trim = (h->type == UI_SETTING_TYPE_RGB);
+
+        lv_obj_t *hit = lv_obj_create(h->obj);
+        lv_obj_remove_style_all(hit);
+        lv_obj_set_style_bg_opa(hit, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_border_width(hit, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(hit, 0, LV_PART_MAIN);
+        lv_obj_clear_flag(hit, LV_OBJ_FLAG_SCROLLABLE);
+        /* FLOATING：不参与 flex，避免改显示布局 */
+        lv_obj_add_flag(hit, LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(h->obj, LV_OBJ_FLAG_CLICKABLE);
+
+        if (rgb_trim) {
+            const lv_coord_t hit_h = row_h - (lv_coord_t)SETTING_RGB_HIT_TRIM_BOTTOM;
+            lv_obj_set_size(hit, lv_pct(100), hit_h > 8 ? hit_h : 8);
+            lv_obj_align(hit, LV_ALIGN_TOP_LEFT, 0, 0);
+            lv_obj_set_ext_click_area(hit, 0);
+        } else if (sub_row) {
+            /* System：上探盖住 RGB 下空档；下沿仍裁给 Timed */
+            const lv_coord_t shift = (lv_coord_t)SETTING_SUB_HIT_SHIFT_UP;
+            const lv_coord_t hit_h =
+                row_h - (lv_coord_t)SETTING_SUB_HIT_TRIM_BOTTOM + shift;
+            lv_obj_set_size(hit, lv_pct(100), hit_h > 8 ? hit_h : 8);
+            lv_obj_align(hit, LV_ALIGN_TOP_LEFT, 0, -shift);
+            lv_obj_set_ext_click_area(hit, 0);
+        } else if (timed_sw) {
+            /* Timed：上移吃进 System 下空档；高度补足仍盖住本行底边 */
+            const lv_coord_t shift = (lv_coord_t)SETTING_TIMED_HIT_SHIFT_UP;
+            lv_obj_set_size(hit, lv_pct(100), row_h + shift);
+            lv_obj_align(hit, LV_ALIGN_TOP_LEFT, 0, -shift);
+            lv_obj_set_ext_click_area(hit, 0);
+        } else {
+            lv_obj_set_size(hit, lv_pct(100), row_h);
+            lv_obj_align(hit, LV_ALIGN_TOP_LEFT, 0, 0);
+            lv_obj_set_ext_click_area(hit, SETTING_ITEM_CLICK_EXT);
+        }
+        lv_obj_add_event_cb(hit, setting_scr_event, LV_EVENT_CLICKED, (void *)h);
+        lv_obj_move_foreground(hit);
     }
 }
 
@@ -1230,6 +1278,8 @@ static void create2(lv_obj_t *parent)
     lv_obj_set_style_border_width(setting_list, 0, LV_PART_MAIN);
     lv_obj_set_style_border_color(setting_list, DECKPRO_COLOR_FG, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(setting_list, 0, LV_PART_MAIN);
+    /* Timed 热区上探出本行时仍可命中 */
+    lv_obj_add_flag(setting_list, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
 
     setting_num = sizeof(setting_handle_list) / sizeof(setting_handle_list[0]);
     setting_page_num = setting_num / SETTING_PAGE_MAX_ITEM;
@@ -1269,6 +1319,11 @@ static void destroy2(void)
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
     setting_ui_detach();
 #endif
+    for (int i = 0; i < setting_num; i++) {
+        setting_handle_list[i].obj = NULL;
+        setting_handle_list[i].st = NULL;
+    }
+    setting_list = NULL;
 }
 
 static scr_lifecycle_t screen2 = {
@@ -3481,8 +3536,9 @@ static int s_shutdown_phase = 0;
 static uint32_t s_shutdown_hold_since_ms = 0;
 /** Deck 关机页已上屏：禁止 Mesh 松手 SHUTDOWN 再刷「Shutting Down...」盖住 logo。 */
 static bool s_deck_shutdown_ui_active = false;
-/** 低电自动关机：SCREEN9 在 logo 底部加「Low battery off」（手动 Shutdown / Boot 长按不加）。 */
+/** SCREEN9 底部文案：低电 / 定时关机（手动 Shutdown、Boot 长按不加）。 */
 static bool s_shutdown_low_batt_hint = false;
+static bool s_shutdown_timed_hint = false;
 
 #ifndef W20_SHUTDOWN_LOGO_HOLD_MS
 #define W20_SHUTDOWN_LOGO_HOLD_MS 2000u
@@ -3533,14 +3589,20 @@ static void create9(lv_obj_t *parent)
     /* 手动点 Shutdown：无论是否插着 USB / 充电中，都允许关机。
      * 早期版本在此处判定 ui_battery_vbus_in() 阻止充电中关机，与用户预期不符。 */
     deckpro_logo_show(parent);
-    /* 低电：对齐 Sleep 版式 — img_start + 底部提示；仍走真关机（非软睡）。 */
-    if (s_shutdown_low_batt_hint) {
+    /* 与 Sleep 同版式：img_start + 底部文案（BOTTOM_MID -36） */
+    const char *hint_txt = NULL;
+    if (s_shutdown_low_batt_hint)
+        hint_txt = "Low battery off";
+    else if (s_shutdown_timed_hint)
+        hint_txt = "Timed Shutdown";
+    s_shutdown_low_batt_hint = false;
+    s_shutdown_timed_hint = false;
+    if (hint_txt) {
         lv_obj_t *hint = lv_label_create(parent);
-        lv_label_set_text(hint, "Low battery off");
+        lv_label_set_text(hint, hint_txt);
         lv_obj_set_style_text_color(hint, lv_color_black(), LV_PART_MAIN);
         lv_obj_set_style_text_font(hint, FONT_BOLD_MONO_SIZE_19, LV_PART_MAIN);
-        lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -28);
-        s_shutdown_low_batt_hint = false;
+        lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -36);
     }
     s_shutdown_phase = 0;
     s_shutdown_hold_since_ms = 0;
@@ -5188,11 +5250,14 @@ extern "C" void ui_deckpro_poll_boot_shutdown(void)
         s_boot_press_start_ms = millis();
         s_boot_tracking = true;
         s_boot_long_fired = false;
+        w20_auto_off_kick();
     }
 
     if (raw && s_boot_tracking && !s_boot_long_fired) {
         if (millis() - s_boot_press_start_ms >= BOOT_KEY_SHUTDOWN_LONG_MS) {
             s_boot_long_fired = true;
+            s_shutdown_low_batt_hint = false;
+            s_shutdown_timed_hint = false;
             W20_UI_LOG("boot long %ums -> SCREEN9 shutdown", (unsigned)BOOT_KEY_SHUTDOWN_LONG_MS);
             scr_push_subscreen(SCREEN9_ID);
         }
@@ -5209,11 +5274,28 @@ extern "C" void ui_deckpro_poll_boot_shutdown(void)
 extern "C" void ui_deckpro_request_shutdown_from_mesh(void)
 {
     s_shutdown_low_batt_hint = false;
+    s_shutdown_timed_hint = false;
     if (w20_shell_mesh_screen_allowed()) {
         w20_shell_suppress_menu_present_once();
         ui_deckpro_exit_mesh();
     }
     W20_UI_LOG("mesh hibernate long -> SCREEN9 shutdown");
+    scr_push_subscreen(SCREEN9_ID);
+}
+
+extern "C" void ui_deckpro_request_auto_off_shutdown(void)
+{
+    if (scr_mgr_top_id() == SCREEN9_ID)
+        return;
+    s_shutdown_low_batt_hint = false;
+    s_shutdown_timed_hint = true;
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+    if (w20_shell_mesh_screen_allowed()) {
+        w20_shell_suppress_menu_present_once();
+        ui_deckpro_exit_mesh();
+    }
+#endif
+    W20_UI_LOG("auto_off idle -> SCREEN9 (img_start + Timed Shutdown)");
     scr_push_subscreen(SCREEN9_ID);
 }
 
@@ -5230,6 +5312,7 @@ extern "C" void ui_deckpro_poll_low_batt_shutdown(void)
 
     s_low_batt_shutdown_pushed = true;
     s_shutdown_low_batt_hint = true;
+    s_shutdown_timed_hint = false;
     W20_UI_LOG("low-batt auto -> SCREEN9 (img_start + Low battery off)");
     scr_push_subscreen(SCREEN9_ID);
 #else
@@ -5240,6 +5323,8 @@ extern "C" void ui_deckpro_poll_low_batt_shutdown(void)
 
 void ui_deckpro_entry(void)
 {
+    w20_auto_off_init();
+
     lv_disp_t *disp = lv_disp_get_default();
     disp->theme = lv_theme_mono_init(disp, false, LV_FONT_DEFAULT);
 
