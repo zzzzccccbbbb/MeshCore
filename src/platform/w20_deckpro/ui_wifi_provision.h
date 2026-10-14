@@ -53,7 +53,11 @@ void ui_wifi_provisioning_set_ui_callback(ui_wifi_prov_ui_cb_t cb);
 
 ui_wifi_prov_state_t ui_wifi_provisioning_get_state(void);
 
+/** SoftAP 名（Mesh-XXXXXX）。未 start 过也会按 MAC 预填，供 Config 首帧墨水显示。 */
 void ui_wifi_provisioning_get_ap_ssid(char *buf, size_t len);
+
+/** 若尚未生成 AP SSID，按 MAC 预填（不起射频）。 */
+void ui_wifi_provisioning_ensure_ap_ssid(void);
 
 /** Human-readable status for device screen. */
 void ui_wifi_provisioning_get_status_text(char *buf, size_t len);

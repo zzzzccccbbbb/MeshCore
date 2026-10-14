@@ -2001,6 +2001,15 @@ static void wifi_cfg_deferred_start_cb(lv_timer_t *timer)
         return;
     }
 
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+    /* Config 页墨水未刷完先不起 SoftAP，避免指引未显示就停墨/抢 SPI */
+    if (ui_deckpro_epd_flush_busy()) {
+        wifi_cfg_deferred_timer = lv_timer_create(wifi_cfg_deferred_start_cb, 120, NULL);
+        lv_timer_set_repeat_count(wifi_cfg_deferred_timer, 1);
+        return;
+    }
+#endif
+
     /* 已连路由器：只显示状态，不拆 STA、不起 SoftAP。
      * 开机自动重连中（有保存 SSID、非 hold-offline）：也不起 SoftAP，否则会掐掉正在连的 STA。
      * 未配网 / 用户 Disconnect hold-offline：才起 SoftAP。 */
@@ -2012,8 +2021,8 @@ static void wifi_cfg_deferred_start_cb(lv_timer_t *timer)
     ui_wifi_provisioning_start(needSoftAp);
     wifi_cfg_update_status();
     if (needSoftAp) {
-        ui_disp_full_refr(); /* 先刷 SoftAP 指引 */
-        wifi_cfg_arm_epd_pause_soon(); /* 尽快停墨，门户期勿与 EPD SPI 抢总线 */
+        /* 进页 prepare 已 FULL；此处勿再叠一帧，只臂停墨（provTask 也会等 busy 结束） */
+        wifi_cfg_arm_epd_pause_soon();
     }
     /* SoftAP 配网期间勿开 taskbar 秒级刷新；已连/自动重连中可恢复。 */
     if (!needSoftAp) {
@@ -2116,6 +2125,8 @@ static void entry4_1(void)
         wifi_cfg_status_timer = lv_timer_create(wifi_cfg_status_timer_cb, 8000, NULL);
         lv_timer_ready(wifi_cfg_status_timer);
     }
+    /* 首进 Config：SoftAP 尚未 start 时也预填 Mesh-XXXXXX，避免墨水刷出 Mesh-... */
+    ui_wifi_provisioning_ensure_ap_ssid();
     wifi_cfg_update_status();
 
     /* SoftAP 已在跑（从 WiFi 列表再进 Config）：绝不可 teardown，否则手机刚连上就被踢、网页进不去 */
@@ -2162,13 +2173,18 @@ static void exit4_1(void) {
     wifi_cfg_disc_cache[0] = '\0';
     ui_deckpro_resume_aux_timers();
 
-    /* 退回 WiFi 列表：保留 SoftAP/门户，手机可继续打开 http://192.168.4.1
+    /* 退回 WiFi 列表：仅 SoftAP 已起来才保留门户；仍 STARTING 则取消，避免秒退空跑射频。
      * 离开整个 WiFi 菜单时由 ui_wifi_menu_power_off() 统一 stop。 */
     const bool back_to_wifi_list = (scr_mgr_prev_id() == SCREEN4_ID);
-    if (back_to_wifi_list && (ui_wifi_softap_is_up() || ui_wifi_provisioning_active())) {
-        /* 列表页允许刷墨；HTTP 可能稍慢，但不断手机关联 */
+    if (back_to_wifi_list && ui_wifi_softap_is_up()) {
         wifi_cfg_set_epd_paused(false);
         W20_WIFI_LOGLN("[WiFiCfg] back to WIFI list — keep SoftAP portal");
+        return;
+    }
+    if (back_to_wifi_list && ui_wifi_provisioning_active()) {
+        wifi_cfg_set_epd_paused(false);
+        ui_wifi_provisioning_request_stop();
+        W20_WIFI_LOGLN("[WiFiCfg] back to WIFI list — SoftAP not ready, cancel start");
         return;
     }
 
@@ -2998,9 +3014,15 @@ static void scr6_batt_timer_event(lv_timer_t *t)
 {
     (void)t;
     /* 每 5s 探测；Offline/数值不变则不刷墨 */
-    if (scr6_battery_update()) {
-        ui_disp_full_refr();
+    const bool changed = scr6_battery_update();
+    if (!changed) {
+        return;
     }
+    /* 在途 FULL 时叠刷易乱屏（退出 Battery 时 gen mismatch / snapshot 撕裂） */
+    if (ui_deckpro_epd_flush_busy()) {
+        return;
+    }
+    ui_disp_full_refr();
 }
 
 static void scr6_btn_event_cb(lv_event_t *e)
@@ -4993,6 +5015,9 @@ extern "C" void ui_deckpro_on_power_status_changed(void)
             return;
         }
         scr6_battery_update();
+        if (ui_deckpro_epd_flush_busy()) {
+            return;
+        }
         lv_obj_t *scr = lv_scr_act();
         if (scr != nullptr) {
             lv_obj_invalidate(scr);

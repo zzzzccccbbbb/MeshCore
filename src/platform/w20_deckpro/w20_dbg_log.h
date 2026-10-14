@@ -9,29 +9,29 @@
 /* ---------- 模块开关（0/1）---------- */
 
 #ifndef W20_LOG_BAT
-#define W20_LOG_BAT 0
+#define W20_LOG_BAT 1
 #endif
 
 #ifndef W20_LOG_WIFI
-#define W20_LOG_WIFI 0
+#define W20_LOG_WIFI 1
 #endif
 
 #ifndef W20_LOG_UI
-#define W20_LOG_UI 0
+#define W20_LOG_UI 1
 #endif
 
 #ifndef W20_LOG_TOUCH
-#define W20_LOG_TOUCH 0
+#define W20_LOG_TOUCH 1
 #endif
 #ifndef W20_LOG_SETTING
-#define W20_LOG_SETTING 0
+#define W20_LOG_SETTING 1
 #endif
 
 #ifndef W20_LOG_GPS
-#define W20_LOG_GPS 0
+#define W20_LOG_GPS 1
 #endif
 #ifndef W20_LOG_LORA
-#define W20_LOG_LORA 0
+#define W20_LOG_LORA 1
 #endif
 #ifndef W20_LOG_LED_KEY
 #define W20_LOG_LED_KEY 0

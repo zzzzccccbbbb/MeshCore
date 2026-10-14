@@ -36,6 +36,11 @@ static bool s_chg_complete_latched = false;
 static bool s_chg_complete_have = false;
 static uint32_t s_chg_complete_last_true_ms = 0;
 static bool s_vbus_was = false;
+#if W20_BAT_SOC_ALIGN
+/** 上次成功读到的插电态；IP 短暂 NACK 时保持 on_charge。 */
+static bool s_vbus_latched = false;
+static uint32_t s_vbus_ok_ms = 0;
+#endif
 /** 最近一次可信电池电压（过滤 IP KEY 毛刺 / CW 假 0）。 */
 static int s_last_good_vbat_mv = -1;
 static uint32_t s_cw_recover_ms = 0;
@@ -55,6 +60,10 @@ static uint32_t s_quiet_since_ms = 0;
 static uint32_t s_heavy_end_ms = 0;
 static bool s_was_heavy = false;
 static uint32_t s_vbat_learn_ms = 0;
+#if W20_BAT_SOC_ALIGN_VBAT_BOOT_SNAP
+/** 待静载确认后一次性 snap（开机 true；拔电边沿再置 true）。 */
+static bool s_need_vbat_snap = true;
+#endif
 #endif
 #endif
 #if W20_BAT_SOC_CHG_RATCHET
@@ -135,19 +144,24 @@ static void w20_battery_align_attenuate(int cw_ui, int vbat_mv)
 }
 
 /**
- * bias 缓衰回 0：IP 离线（跟回 CW），或充电中消掉负 bias（避免拔电后突然掉）。
+ * bias 缓衰回 0：真离线（跟回 CW），或充电中消掉负 bias（避免拔电后突然掉）。
+ * 插电锁存期间 charging=true → 正 bias 不衰（防 I2C NACK 把 UI 从近满打回去）。
+ * 拔电后 VBAT≥HOLD（默认 3.6V）→ 正 bias 不衰（整段信 VBAT，勿抖一点就跟回 CW）。
  */
-static void w20_battery_align_decay_bias(bool ip_online, bool charging)
+static void w20_battery_align_decay_bias(bool ip_online, bool charging, int vbat_mv)
 {
     if (s_align_bias == 0)
         return;
-    /* 充电：只衰负 bias；离线：双向衰 */
+    /* 充电（含 VBUS 锁存）：只衰负 bias；IP 在线放电：不衰 */
     if (charging) {
         if (s_align_bias >= 0)
             return;
     } else if (ip_online) {
         return;
     }
+    /* ≥HOLD：正 bias 保着；静载 vbat-ref 可按 LUT 慢慢下调，勿直接衰到 CW */
+    if (s_align_bias > 0 && vbat_mv >= (int)W20_BAT_SOC_ALIGN_HOLD_BIAS_MV)
+        return;
     const uint32_t now = millis();
     if (s_align_decay_ms != 0 &&
         (uint32_t)(now - s_align_decay_ms) < (uint32_t)W20_BAT_SOC_ALIGN_DECAY_MS)
@@ -159,17 +173,19 @@ static void w20_battery_align_decay_bias(bool ip_online, bool charging)
         s_align_bias++;
 }
 
+static bool w20_battery_ip_finish_latched(void);
+
 /**
  * 分阶段学 bias：|IP−CW| / 电压分歧大 → 更慢、步子更小，不一次钉死到 IP。
- * @param ip_mv IP VBAT（无效传 -1）；与 CW 电压差大时至少按中分歧处理。
- * @param vbat_mv 融合 VBAT；静载时若 IP% 与 V→LUT 差大，抬 gap 降信任。
- * @param charging VBUS/充电中：停学（IP% 偏低会把 UI 往下拽）。
+ * @param charging 充电：只学正方向（向 IP 攀升）；放电：原逻辑（heavy 停学）。
  */
 static void w20_battery_align_learn(int ip_pct, int cw_ui, bool heavy, int cw_mv, int ip_mv, int vbat_mv,
                                     bool vbat_quiet, bool charging)
 {
-    /* KEY 休眠 / 大电流 IR / 充电：勿学 */
-    if (ip_pct < 0 || cw_ui < 0 || s_key_sleep_mode || heavy || charging)
+    if (ip_pct < 0 || cw_ui < 0 || s_key_sleep_mode)
+        return;
+    /* 放电：大电流 IR 勿学。充电：允许慢爬（下面强制大分歧档）。 */
+    if (!charging && heavy)
         return;
     /* 见底时 err≈IP−0 会把 bias 顶满，禁止学习 */
     if (cw_ui <= (int)W20_BAT_SOC_ALIGN_EMPTY_CW_PCT)
@@ -177,7 +193,16 @@ static void w20_battery_align_learn(int ip_pct, int cw_ui, bool heavy, int cw_mv
     if (!w20_ip5356_is_present())
         return;
 
-    const int err = ip_pct - cw_ui;
+    /* 充电：未 Finish 时 IP 常虚报 100 → 目标封顶 CHARGE_CAP；Finish 后可学到 100 */
+    int ip_tgt = ip_pct;
+    if (charging) {
+        if (!w20_battery_ip_finish_latched() && ip_tgt > (int)W20_BAT_SOC_CHARGE_CAP_PCT)
+            ip_tgt = (int)W20_BAT_SOC_CHARGE_CAP_PCT;
+        if (ip_tgt <= cw_ui)
+            return;
+    }
+
+    const int err = ip_tgt - cw_ui;
     int gap = (err >= 0) ? err : -err;
     if (cw_mv >= (int)W20_BAT_CW_VALID_MIN_MV && ip_mv >= (int)W20_BAT_IP_VALID_MIN_MV) {
         int dv = ip_mv - cw_mv;
@@ -187,11 +212,11 @@ static void w20_battery_align_learn(int ip_pct, int cw_ui, bool heavy, int cw_mv
             gap = (int)W20_BAT_SOC_ALIGN_GAP_MID;
     }
 #if W20_BAT_SOC_ALIGN_VBAT_REF
-    /* 静载下 IP% 与 OCV 尺差大：IP 不可猛信，至少按中/大分歧慢靠 */
-    if (vbat_quiet && vbat_mv >= (int)W20_BAT_CW_VALID_MIN_MV) {
+    /* 静载下 IP% 与 OCV 尺差大：IP 不可猛信，至少按中/大分歧慢靠（放电路径） */
+    if (!charging && vbat_quiet && vbat_mv >= (int)W20_BAT_CW_VALID_MIN_MV) {
         const int v_ref = w20_battery_lut_raw(vbat_mv, false);
         if (v_ref >= 0) {
-            int dv_pct = ip_pct - v_ref;
+            int dv_pct = ip_tgt - v_ref;
             if (dv_pct < 0)
                 dv_pct = -dv_pct;
             if (dv_pct >= (int)W20_BAT_SOC_ALIGN_GAP_LARGE && gap < (int)W20_BAT_SOC_ALIGN_GAP_LARGE)
@@ -208,7 +233,30 @@ static void w20_battery_align_learn(int ip_pct, int cw_ui, bool heavy, int cw_mv
     int div = (W20_BAT_SOC_ALIGN_EMA_DIV > 0) ? (int)W20_BAT_SOC_ALIGN_EMA_DIV : 8;
     int max_step = 2;
     uint32_t learn_ms = W20_BAT_SOC_ALIGN_LEARN_MS;
-    if (gap >= (int)W20_BAT_SOC_ALIGN_GAP_LARGE) {
+    if (charging) {
+        /* 充电攀升：默认慢档；CV 尾（小电流+高 V）加快；大电流再更慢 */
+        div = (W20_BAT_SOC_ALIGN_EMA_DIV_LARGE > 0) ? (int)W20_BAT_SOC_ALIGN_EMA_DIV_LARGE : 32;
+        max_step = 1;
+        learn_ms = W20_BAT_SOC_ALIGN_LEARN_MS_CHG;
+        const int ib_mag = (s_last_ibat_ma < 0) ? -s_last_ibat_ma : s_last_ibat_ma;
+        const bool ib_fresh =
+            (s_last_ibat_ms != 0) && ((uint32_t)(millis() - s_last_ibat_ms) < 10000u);
+        const int v_ref_mv =
+            (vbat_mv >= (int)W20_BAT_CW_VALID_MIN_MV) ? vbat_mv
+            : ((ip_mv >= (int)W20_BAT_IP_VALID_MIN_MV) ? ip_mv : 0);
+        const bool cv_tail =
+            ib_fresh && !heavy && (ib_mag <= (int)W20_BAT_SOC_ALIGN_CV_IBAT_MA) &&
+            (v_ref_mv >= (int)W20_BAT_SOC_ALIGN_CV_MV);
+        if (cv_tail) {
+            learn_ms = W20_BAT_SOC_ALIGN_LEARN_MS_CHG_CV;
+            max_step = 2;
+            div = (W20_BAT_SOC_ALIGN_EMA_DIV_MID > 0) ? (int)W20_BAT_SOC_ALIGN_EMA_DIV_MID : 16;
+        } else if (heavy || gap >= (int)W20_BAT_SOC_ALIGN_GAP_LARGE) {
+            learn_ms = W20_BAT_SOC_ALIGN_LEARN_MS_LARGE;
+        }
+        if (!cv_tail && gap < (int)W20_BAT_SOC_ALIGN_GAP_LARGE)
+            gap = (int)W20_BAT_SOC_ALIGN_GAP_LARGE;
+    } else if (gap >= (int)W20_BAT_SOC_ALIGN_GAP_LARGE) {
         div = (W20_BAT_SOC_ALIGN_EMA_DIV_LARGE > 0) ? (int)W20_BAT_SOC_ALIGN_EMA_DIV_LARGE : 32;
         max_step = 1;
         learn_ms = W20_BAT_SOC_ALIGN_LEARN_MS_LARGE;
@@ -229,9 +277,15 @@ static void w20_battery_align_learn(int ip_pct, int cw_ui, bool heavy, int cw_mv
         delta = max_step;
     if (delta < -max_step)
         delta = -max_step;
+    /* 充电只加正 bias，不学负向（防拔电掉 %） */
+    if (charging && delta < 0)
+        return;
+
     s_align_bias += delta;
-    if (s_align_bias > (int)W20_BAT_SOC_ALIGN_BIAS_MAX)
-        s_align_bias = (int)W20_BAT_SOC_ALIGN_BIAS_MAX;
+    const int bias_max =
+        charging ? (int)W20_BAT_SOC_ALIGN_BIAS_MAX_CHG : (int)W20_BAT_SOC_ALIGN_BIAS_MAX;
+    if (s_align_bias > bias_max)
+        s_align_bias = bias_max;
     if (s_align_bias < -(int)W20_BAT_SOC_ALIGN_BIAS_MAX)
         s_align_bias = -(int)W20_BAT_SOC_ALIGN_BIAS_MAX;
 }
@@ -257,6 +311,7 @@ static int w20_battery_apply_align(int cw_ui, bool charging)
 #if W20_BAT_SOC_ALIGN_VBAT_REF
 /**
  * 更新静载状态：无快充/快放、非 VBUS（插电抬压不可信）、大电流后已 settle。
+ * IP 离线无 ibat 时（QUIET_NO_IBAT）仍可作候选——拔电后 NACK 常见。
  * @return 当前是否可采信 VBAT→LUT 作参考
  */
 static bool w20_battery_vbat_quiet_update(bool heavy, bool have_ibat, int ibat_ma, bool vbus, int mv)
@@ -277,15 +332,18 @@ static bool w20_battery_vbat_quiet_update(bool heavy, bool have_ibat, int ibat_m
         s_quiet_since_ms = 0;
         return false;
     }
-    if (!have_ibat) {
+    if (have_ibat) {
+        const int mag = (ibat_ma < 0) ? -ibat_ma : ibat_ma;
+        if (mag >= (int)W20_BAT_SOC_ALIGN_QUIET_IBAT_MA) {
+            s_quiet_since_ms = 0;
+            return false;
+        }
+    } else if (!W20_BAT_SOC_ALIGN_QUIET_NO_IBAT) {
+        /* 旧行为：无 ibat 永不 quiet */
         s_quiet_since_ms = 0;
         return false;
     }
-    const int mag = (ibat_ma < 0) ? -ibat_ma : ibat_ma;
-    if (mag >= (int)W20_BAT_SOC_ALIGN_QUIET_IBAT_MA) {
-        s_quiet_since_ms = 0;
-        return false;
-    }
+    /* QUIET_NO_IBAT：IP 离线无电流可读，仍作静载候选（大电流由 heavy/last_ibat 挡住） */
     if (s_quiet_since_ms == 0)
         s_quiet_since_ms = now;
 
@@ -296,17 +354,112 @@ static bool w20_battery_vbat_quiet_update(bool heavy, bool have_ibat, int ibat_m
 }
 
 /**
+ * 近满静息滞回：进入 ≥REST_90，退出 ＜REST_90_EXIT，避免 4100↔4097 丢地板。
+ * 插电清锁。
+ */
+static bool w20_battery_rest_near_hyst(int mv, bool on_charge)
+{
+    static bool s_rest_near = false;
+    if (on_charge) {
+        s_rest_near = false;
+        return false;
+    }
+    if (mv >= (int)W20_BAT_NEAR_FULL_MV_REST_90)
+        s_rest_near = true;
+    else if (mv < (int)W20_BAT_NEAR_FULL_MV_REST_90_EXIT)
+        s_rest_near = false;
+    return s_rest_near;
+}
+
+/**
+ * 静载电压软目标：≥HOLD(3.6V) 采信；线性 LUT，近满滞回再抬到地板（≥90/95）。
+ * 避免 LUT≈83 仍被 bias_cap 钉在 76、或 4097 抖掉回 CW。
+ */
+static int w20_battery_vbat_soft_target(int mv, bool on_charge)
+{
+    if (mv < (int)W20_BAT_SOC_ALIGN_HOLD_BIAS_MV)
+        return -1;
+    int v_ref = w20_battery_lut_raw(mv, false);
+    if (v_ref < 0)
+        return -1;
+    if (w20_battery_rest_near_hyst(mv, on_charge)) {
+        const int floor = (mv >= (int)W20_BAT_NEAR_FULL_MV_99) ? 95 : 90;
+        if (v_ref < floor)
+            v_ref = floor;
+    }
+    return v_ref;
+}
+
+#if W20_BAT_SOC_ALIGN_VBAT_BOOT_SNAP
+/**
+ * 开机/拔电后首次静载：按 VBAT 软目标一次性钉 bias，并跳过 UI slew。
+ * 小 gap 也清 need 标志，避免反复触发。
+ */
+static void w20_battery_align_vbat_boot_snap(int cw_ui, int mv, bool quiet, bool on_charge)
+{
+    if (!s_need_vbat_snap || on_charge || !quiet || cw_ui < 0)
+        return;
+    if (cw_ui <= (int)W20_BAT_SOC_ALIGN_EMPTY_CW_PCT)
+        return;
+    if (mv < (int)W20_BAT_CW_VALID_MIN_MV)
+        return;
+
+    const int v_ref = w20_battery_vbat_soft_target(mv, on_charge);
+    if (v_ref < 0)
+        return;
+
+    const int ui_now = clamp_pct(cw_ui + s_align_bias);
+    int gap = ui_now - v_ref;
+    if (gap < 0)
+        gap = -gap;
+    if (gap < (int)W20_BAT_SOC_ALIGN_VBAT_GAP_MIN) {
+        s_need_vbat_snap = false;
+        return;
+    }
+
+    int bias_max = (int)W20_BAT_SOC_ALIGN_BIAS_MAX;
+    if (mv >= (int)W20_BAT_SOC_ALIGN_HOLD_BIAS_MV &&
+        (int)W20_BAT_SOC_ALIGN_VBAT_BIAS_MAX > bias_max)
+        bias_max = (int)W20_BAT_SOC_ALIGN_VBAT_BIAS_MAX;
+
+    int target_bias = v_ref - cw_ui;
+    if (target_bias > bias_max)
+        target_bias = bias_max;
+    if (target_bias < -(int)W20_BAT_SOC_ALIGN_BIAS_MAX)
+        target_bias = -(int)W20_BAT_SOC_ALIGN_BIAS_MAX;
+
+    const int old_bias = s_align_bias;
+    s_align_bias = target_bias;
+    s_need_vbat_snap = false;
+    s_vbat_learn_ms = millis(); /* 本拍已对齐，勿立刻再慢纠一步 */
+
+    const int ui_new = clamp_pct(cw_ui + s_align_bias);
+    if (s_ui_display >= 0)
+        s_ui_display = ui_new;
+
+    W20_BAT_LOG("[BAT] vbat-snap: V=%dmV→%d%% cw=%d%% bias=%d→%d ui→%d%% (gap=%d)\n", mv, v_ref, cw_ui,
+                old_bias, s_align_bias, ui_new, gap);
+}
+#endif /* W20_BAT_SOC_ALIGN_VBAT_BOOT_SNAP */
+
+/**
  * 静载 VBAT→LUT 作软目标：|UI−Vref| 大才慢纠 bias，不一次钉死。
  * IP 在线时与 IP 学并行：电压只作「别偏太离谱」的阶段性拉回。
+ * ≥HOLD(3.6V) 放宽 bias 上限；近满滞回地板避免 4097 抖掉。
  */
-static void w20_battery_align_vbat_ref(int cw_ui, int mv, bool quiet)
+static void w20_battery_align_vbat_ref(int cw_ui, int mv, bool quiet, bool on_charge)
 {
     if (!quiet || cw_ui < 0)
         return;
     if (cw_ui <= (int)W20_BAT_SOC_ALIGN_EMPTY_CW_PCT)
         return;
+#if W20_BAT_SOC_ALIGN_VBAT_BOOT_SNAP
+    /* 仍待 snap：留给 boot_snap，避免先慢爬再跳 */
+    if (s_need_vbat_snap)
+        return;
+#endif
 
-    const int v_ref = w20_battery_lut_raw(mv, false);
+    const int v_ref = w20_battery_vbat_soft_target(mv, on_charge);
     if (v_ref < 0)
         return;
 
@@ -324,7 +477,7 @@ static void w20_battery_align_vbat_ref(int cw_ui, int mv, bool quiet)
     s_vbat_learn_ms = now;
 
     const int target_bias = v_ref - cw_ui;
-    const int div = (W20_BAT_SOC_ALIGN_VBAT_EMA_DIV > 0) ? (int)W20_BAT_SOC_ALIGN_VBAT_EMA_DIV : 24;
+    const int div = (W20_BAT_SOC_ALIGN_VBAT_EMA_DIV > 0) ? (int)W20_BAT_SOC_ALIGN_VBAT_EMA_DIV : 16;
     int max_step = (int)W20_BAT_SOC_ALIGN_VBAT_MAX_STEP;
     if (max_step < 1)
         max_step = 1;
@@ -336,8 +489,13 @@ static void w20_battery_align_vbat_ref(int cw_ui, int mv, bool quiet)
     if (delta < -max_step)
         delta = -max_step;
     s_align_bias += delta;
-    if (s_align_bias > (int)W20_BAT_SOC_ALIGN_BIAS_MAX)
-        s_align_bias = (int)W20_BAT_SOC_ALIGN_BIAS_MAX;
+
+    int bias_max = (int)W20_BAT_SOC_ALIGN_BIAS_MAX;
+    if (mv >= (int)W20_BAT_SOC_ALIGN_HOLD_BIAS_MV &&
+        (int)W20_BAT_SOC_ALIGN_VBAT_BIAS_MAX > bias_max)
+        bias_max = (int)W20_BAT_SOC_ALIGN_VBAT_BIAS_MAX;
+    if (s_align_bias > bias_max)
+        s_align_bias = bias_max;
     if (s_align_bias < -(int)W20_BAT_SOC_ALIGN_BIAS_MAX)
         s_align_bias = -(int)W20_BAT_SOC_ALIGN_BIAS_MAX;
 
@@ -623,9 +781,10 @@ static int w20_battery_lut_raw(int mv, bool heavy)
 /**
  * 近满电压地板：仅小幅抬升，且 CW 已近满。
  * 禁止「充到 78% 拔电 → V 回弹过阈值 → 地板 99 → 锁 100」。
+ * 拔电静息：门槛更低；≥4.10V 进地板≥90（退出＜4.00V 滞回），≥4.18→95；封顶 95。
  */
 static int w20_battery_near_full_floor_pct(int mv, int cw_pct, int ip_pct, bool heavy_load, int ibat_ma,
-                                          bool have_ibat)
+                                          bool have_ibat, bool on_charge)
 {
 #if !W20_BAT_NEAR_FULL_FLOOR
     (void)mv;
@@ -634,12 +793,28 @@ static int w20_battery_near_full_floor_pct(int mv, int cw_pct, int ip_pct, bool 
     (void)heavy_load;
     (void)ibat_ma;
     (void)have_ibat;
+    (void)on_charge;
     return -1;
 #else
     (void)ip_pct; /* 不再用 IP% 抬地板 */
-    if (mv < (int)W20_BAT_NEAR_FULL_MV_90 || heavy_load)
+    if (heavy_load)
         return -1;
-    if (cw_pct < 0 || cw_pct < (int)W20_BAT_NEAR_FULL_MIN_CW_PCT)
+
+#if W20_BAT_SOC_ALIGN && W20_BAT_SOC_ALIGN_VBAT_REF
+    const bool rest_near = w20_battery_rest_near_hyst(mv, on_charge);
+#else
+    const bool rest_near =
+        !on_charge && mv >= (int)W20_BAT_NEAR_FULL_MV_REST_90;
+#endif
+    /* 普通近满仍要 ≥4100；静息滞回锁存后可低至 EXIT(4000)，避免 4097 丢地板 */
+    if (!rest_near && mv < (int)W20_BAT_NEAR_FULL_MV_90)
+        return -1;
+    if (rest_near && mv < (int)W20_BAT_NEAR_FULL_MV_REST_90_EXIT)
+        return -1;
+    const int min_cw = on_charge ? (int)W20_BAT_NEAR_FULL_MIN_CW_PCT_CHG
+                                 : (rest_near ? (int)W20_BAT_NEAR_FULL_MIN_CW_PCT_REST
+                                              : (int)W20_BAT_NEAR_FULL_MIN_CW_PCT);
+    if (cw_pct < 0 || cw_pct < min_cw)
         return -1;
     if (have_ibat) {
         const int mag = (ibat_ma < 0) ? -ibat_ma : ibat_ma;
@@ -648,15 +823,21 @@ static int w20_battery_near_full_floor_pct(int mv, int cw_pct, int ip_pct, bool 
     }
 
     int floor = 90;
-    if (mv >= (int)W20_BAT_NEAR_FULL_MV_99)
+    int max_lift = (int)W20_BAT_NEAR_FULL_MAX_LIFT_PCT;
+    if (rest_near) {
+        /* 满电≈4.2V：滞回保 ≥90；≥4.18→95。勿 4097 抖回 CW。 */
+        floor = (mv >= (int)W20_BAT_NEAR_FULL_MV_99) ? 95 : 90;
+        max_lift = (int)W20_BAT_NEAR_FULL_MAX_LIFT_PCT_REST;
+    } else if (mv >= (int)W20_BAT_NEAR_FULL_MV_99) {
         floor = (int)W20_BAT_SOC_CHARGE_CAP_PCT; /* 地板最多 99；对号亮时由 hysteresis 升到 100 */
-    else if (mv >= (int)W20_BAT_NEAR_FULL_MV_95)
+    } else if (mv >= (int)W20_BAT_NEAR_FULL_MV_95) {
         floor = 95;
+    }
 
     if ((floor - cw_pct) < (int)W20_BAT_NEAR_FULL_LAG_PCT)
         return -1;
     /* 相对 CW 限幅抬升 */
-    const int capped = cw_pct + (int)W20_BAT_NEAR_FULL_MAX_LIFT_PCT;
+    const int capped = cw_pct + max_lift;
     if (floor > capped)
         floor = capped;
     if (floor <= cw_pct)
@@ -725,28 +906,45 @@ int w20_battery_read_percent(void)
 
     bool vbus = false;
     bool charging = false;
+    bool st_ok = false;
     if (ipPresent) {
         IP5356::Status st;
         if (w20_ip5356_read_status(st)) {
+            st_ok = true;
             vbus = st.inputPresent;
             charging = st.charging;
         }
     }
+#if W20_BAT_SOC_ALIGN
+    /* 插电锁存：成功读到则更新；失败则在 HOLD 内保持，避免 NACK 当拔电衰 bias */
+    if (st_ok) {
+        s_vbus_latched = (vbus || charging);
+        s_vbus_ok_ms = millis();
+    } else if (s_vbus_latched) {
+        if ((uint32_t)(millis() - s_vbus_ok_ms) > (uint32_t)W20_BAT_SOC_ALIGN_VBUS_HOLD_MS)
+            s_vbus_latched = false;
+    }
+    const bool on_charge = (vbus || charging) || s_vbus_latched;
+#else
     const bool on_charge = vbus || charging;
+#endif
 #if USE_CW2217_GAUGE
     int cwUi = w20_battery_cw_scale_ui(cwRaw);
 #if W20_BAT_SOC_ALIGN && !W20_BAT_UI_SRC_IP5356
-    /* 分阶段学 bias；充电停学+衰负 bias；静载 VBAT；见底/低 V 清正 bias */
+    /* 分阶段学 bias；充电正攀升+衰负 bias；静载 VBAT（仅非充）；见底/低 V 清正 bias */
 #if W20_BAT_SOC_ALIGN_VBAT_REF
-    const bool vbat_quiet = w20_battery_vbat_quiet_update(heavy, have_ibat, ibat, vbus, mv);
+    const bool vbat_quiet = w20_battery_vbat_quiet_update(heavy, have_ibat, ibat, on_charge, mv);
 #else
     const bool vbat_quiet = false;
 #endif
     if (ipPct >= 0)
         w20_battery_align_learn(ipPct, cwUi, heavy, cwMv, ipMv, mv, vbat_quiet, on_charge);
-    w20_battery_align_decay_bias(ipPct >= 0, on_charge);
+    w20_battery_align_decay_bias(ipPct >= 0, on_charge, mv);
 #if W20_BAT_SOC_ALIGN_VBAT_REF
-    w20_battery_align_vbat_ref(cwUi, mv, vbat_quiet);
+#if W20_BAT_SOC_ALIGN_VBAT_BOOT_SNAP
+    w20_battery_align_vbat_boot_snap(cwUi, mv, vbat_quiet, on_charge);
+#endif
+    w20_battery_align_vbat_ref(cwUi, mv, vbat_quiet, on_charge);
 #endif
     w20_battery_align_attenuate(cwUi, mv);
     cwUi = w20_battery_apply_align(cwUi, on_charge);
@@ -755,8 +953,8 @@ int w20_battery_read_percent(void)
     const int cwUi = -1;
 #endif
 
-    /* 拔电边沿：主源未到近满则清满电锁，禁止假 100% */
-    if (s_vbus_was && !vbus) {
+    /* 拔电边沿（含锁存到期）：主源未到近满则清满电锁，禁止假 100% */
+    if (s_vbus_was && !on_charge) {
 #if W20_BAT_UI_SRC_IP5356
         const int edgePct = ipPct;
 #else
@@ -770,8 +968,12 @@ int w20_battery_read_percent(void)
 #if W20_BAT_SOC_CHG_RATCHET
         s_chg_ui_floor = -1;
 #endif
+#if W20_BAT_SOC_ALIGN_VBAT_REF && W20_BAT_SOC_ALIGN_VBAT_BOOT_SNAP
+        /* 拔电后再确认一次静载 VBAT，直接对齐，勿慢爬 */
+        s_need_vbat_snap = true;
+#endif
     }
-    s_vbus_was = vbus;
+    s_vbus_was = on_charge;
 
     /*
      * UI%：默认 CW（拉伸 + IP bias）→ LUT；可选 IP 主源试跑（宏=1）。
@@ -797,7 +999,8 @@ int w20_battery_read_percent(void)
     if (cwUi >= 0) {
         src = W20_BAT_SRC_CW2217;
         raw_pct = cwUi;
-        const int floor = w20_battery_near_full_floor_pct(mv, raw_pct, ipPct, heavy, ibat, have_ibat);
+        const int floor =
+            w20_battery_near_full_floor_pct(mv, raw_pct, ipPct, heavy, ibat, have_ibat, on_charge);
         if (floor > raw_pct)
             raw_pct = floor;
     } else
@@ -857,7 +1060,7 @@ int w20_battery_read_percent(void)
             raw_pct >= (int)W20_BAT_NEAR_FULL_MIN_CW_PCT &&
             (raw_pct - s_ui_display) >= (int)W20_BAT_NEAR_FULL_LAG_PCT &&
             (raw_pct - s_ui_display) <= (int)W20_BAT_NEAR_FULL_MAX_LIFT_PCT &&
-            (mv >= (int)W20_BAT_NEAR_FULL_MV_95 || vbus)) {
+            (mv >= (int)W20_BAT_NEAR_FULL_MV_95 || on_charge)) {
             s_ui_display = raw_pct;
             s_ui_slew_ms = millis();
             pct = w20_battery_apply_full_hysteresis(raw_pct, fullRef, cap99);
@@ -951,6 +1154,8 @@ typedef struct {
 } w20_pwr_alive_t;
 RTC_NOINIT_ATTR static w20_pwr_alive_t s_pwr_alive;
 
+
+
 static const char *w20_esp_rst_name(esp_reset_reason_t r)
 {
     switch (r) {
@@ -1006,6 +1211,7 @@ static void w20_pwr_diag_boot_log(void)
     } else {
         Serial.println(F("[PWR] VERDICT: unclear — see esp_rst / rtc0 above"));
     }
+
 }
 
 static void w20_pwr_alive_kick(void)
@@ -1017,6 +1223,7 @@ static void w20_pwr_alive_kick(void)
     s_pwr_alive.key_sleep = s_key_sleep_mode ? 1 : 0;
 }
 #endif /* ARDUINO_ARCH_ESP32 */
+
 
 bool w20PowerBatteryInit(void)
 {
@@ -1112,9 +1319,15 @@ void w20_battery_dual_soc_log_poll(void)
     const int cwMv = w20_cw2217_is_present() ? w20_cw2217_read_voltage_mv() : -1;
     const int cwSoh = w20_cw2217_is_present() ? w20_cw2217_read_soh_percent() : -1;
     if (cwX100 >= 0) {
-        W20_BAT_LOG("[BAT] UI=%s %d%% | IP5356 %d%% %dmV | CW2217 %d.%02d%% %dmV SOH=%d | bias=%+d key_sleep=%d t=%lu\n",
+        W20_BAT_LOG("[BAT] UI=%s %d%% | IP5356 %d%% %dmV | CW2217 %d.%02d%% %dmV SOH=%d | bias=%+d lat=%d key_sleep=%d t=%lu\n",
                     w20_battery_ui_src_name(), uiPct, ipPct, ipMv, cwX100 / 100, cwX100 % 100, cwMv, cwSoh,
-                    w20_battery_soc_align_bias(), s_key_sleep_mode ? 1 : 0, (unsigned long)now);
+                    w20_battery_soc_align_bias(),
+#if W20_BAT_SOC_ALIGN
+                    s_vbus_latched ? 1 : 0,
+#else
+                    0,
+#endif
+                    s_key_sleep_mode ? 1 : 0, (unsigned long)now);
     } else {
         W20_BAT_LOG("[BAT] UI=%s %d%% | IP5356 %d%% %dmV | CW2217 absent | t=%lu\n", w20_battery_ui_src_name(), uiPct,
                     ipPct, ipMv, (unsigned long)now);

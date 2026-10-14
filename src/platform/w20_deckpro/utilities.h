@@ -7,7 +7,7 @@
  */
 #pragma once
 
-#define UI_T_DECK_PRO_VERSION    "v1.3-261010C"  // Software version
+#define UI_T_DECK_PRO_VERSION    "v1.3-261013B"  // Software version
 #define BOARD_T_DECK_PRO_VERSION "v2.0-260812"  // Hardware version
 
 // Serial
@@ -60,10 +60,15 @@
 /**
  * UI% 策略（默认 CW，IP 仅校准）：
  * - 主源始终 CW2217：先线性拉伸（FULL_RAW），再加 IP 学到的 bias（见 W20_BAT_SOC_ALIGN）
- * - IP 在线且非 KEY 休眠、非大电流、非充电：分阶段学 bias≈IP%−CW拉伸%（分歧大则更慢）
- * - 充电（VBUS/charging）：停学 IP；忽略负 bias；UI 棘轮只升不降，等 CW 超过显示再升
- * - |IP−CW| 或 |V_IP−V_CW| 过大：不猛靠，缓靠；IP 离线时 bias 缓衰回 0（跟回 CW）
+ * - IP 在线且非 KEY 休眠、非大电流：分阶段学 bias≈IP%−CW拉伸%（分歧大则更慢）
+ * - 充电（VBUS/charging）：只学正 bias（向 IP 攀升）；目标封顶 CHARGE_CAP（未 Finish 勿信 IP=100）；
+ *   忽略负 bias；UI 棘轮只升不降；大电流时仍可慢爬（强制大分歧档）
+ * - 插电态锁存：IP 短暂 I2C 失败时保持 on_charge，正 bias 不衰（防卡在 70–80%）
+ * - CV 尾（小电流+高 V）：加快正学；充电近满电压地板门槛略低
+ * - 放电/轻载：逻辑不变（含静载 VBAT、离线衰 bias）
+ * - |IP−CW| 或 |V_IP−V_CW| 过大：不猛靠，缓靠；真离线/拔电后 bias 缓衰回 0（跟回 CW）
  * - 静载 VBAT（无快充/快放、非 VBUS、大电流后已回弹）：LUT% 作阶段性软参考，慢纠 bias
+ * - 开机/拔电：静载确认 VBAT 后一次性 snap bias+UI（勿慢爬像在充电）
  * - CW 见底 / VBAT 过低：清掉正 bias，避免 UI 卡在 bias_max
  * - CW 故障才电压 LUT；插电封顶 99；对号 = Finish +（拉伸+bias 后）UI≥FINISH_ICON_MIN
  */
@@ -148,13 +153,45 @@
 #ifndef W20_BAT_NEAR_FULL_MV_90
 #define W20_BAT_NEAR_FULL_MV_90 4100
 #endif
+/**
+ * 拔电静息：VBAT≥此 mV → UI 地板至少 90%（满电约 4.2V，≥4.10V 不应掉回 CW 裸拉伸）。
+ */
+#ifndef W20_BAT_NEAR_FULL_MV_REST_90
+#define W20_BAT_NEAR_FULL_MV_REST_90 4100
+#endif
+/**
+ * 近满静息地板退出阈值（mV）：进入用 REST_90，退出用本值，避免 4100↔4097 抖掉回 CW。
+ */
+#ifndef W20_BAT_NEAR_FULL_MV_REST_90_EXIT
+#define W20_BAT_NEAR_FULL_MV_REST_90_EXIT 4000
+#endif
 /** CW 至少到此（映射后 UI%）才允许电压地板抬升（低于则完全信任 CW）。 */
 #ifndef W20_BAT_NEAR_FULL_MIN_CW_PCT
 #define W20_BAT_NEAR_FULL_MIN_CW_PCT 80
 #endif
+/**
+ * 充电时近满地板门槛（映射后 UI%）。低于放电门槛，便于 CV 尾靠电压抬一截。
+ */
+#ifndef W20_BAT_NEAR_FULL_MIN_CW_PCT_CHG
+#define W20_BAT_NEAR_FULL_MIN_CW_PCT_CHG 70
+#endif
+/**
+ * 拔电静息近满门槛（映射后 UI%）：CW 拉伸常偏低，门槛留低以便电压地板兜住
+ * （勿因 CW≈58 而整段地板失效 → 掉到 76）。
+ */
+#ifndef W20_BAT_NEAR_FULL_MIN_CW_PCT_REST
+#define W20_BAT_NEAR_FULL_MIN_CW_PCT_REST 40
+#endif
 /** 相对 CW 最多抬升百分点（防拔电 IR 回弹跳变）。 */
 #ifndef W20_BAT_NEAR_FULL_MAX_LIFT_PCT
 #define W20_BAT_NEAR_FULL_MAX_LIFT_PCT 8
+#endif
+/**
+ * 拔电静息近满：相对 CW 最多抬升（≥4.10V→至少 90，CW 拉伸 50 也要抬得上去）。
+ * 仍封顶 95，不直接给 100。
+ */
+#ifndef W20_BAT_NEAR_FULL_MAX_LIFT_PCT_REST
+#define W20_BAT_NEAR_FULL_MAX_LIFT_PCT_REST 50
 #endif
 /** CW 比电压地板至少低这么多才抬升（避免正常抖动）。 */
 #ifndef W20_BAT_NEAR_FULL_LAG_PCT
@@ -206,9 +243,16 @@
 #ifndef W20_BAT_SOC_ALIGN_V_DISAGREE_MV
 #define W20_BAT_SOC_ALIGN_V_DISAGREE_MV 80
 #endif
-/** |bias| 上限；大分歧时也不一次钉死到 IP。 */
+/** |bias| 上限（放电/轻载）；大分歧时也不一次钉死到 IP。 */
 #ifndef W20_BAT_SOC_ALIGN_BIAS_MAX
 #define W20_BAT_SOC_ALIGN_BIAS_MAX 18
+#endif
+/**
+ * 充电攀升专用 bias 上限：CW 拉伸偏低时仍可靠向 IP，使 Finish+UI≥90 可达。
+ * （例：CW 拉伸~65 + bias28 → 93，配合 IP Finish 亮对号。）
+ */
+#ifndef W20_BAT_SOC_ALIGN_BIAS_MAX_CHG
+#define W20_BAT_SOC_ALIGN_BIAS_MAX_CHG 28
 #endif
 #ifndef W20_BAT_SOC_ALIGN_LEARN_MS
 #define W20_BAT_SOC_ALIGN_LEARN_MS 2000u
@@ -217,13 +261,46 @@
 #ifndef W20_BAT_SOC_ALIGN_LEARN_MS_LARGE
 #define W20_BAT_SOC_ALIGN_LEARN_MS_LARGE 5000u
 #endif
+/** 充电正学：默认用大分歧间隔，避免插电后 UI 猛跳。 */
+#ifndef W20_BAT_SOC_ALIGN_LEARN_MS_CHG
+#define W20_BAT_SOC_ALIGN_LEARN_MS_CHG 4000u
+#endif
+/**
+ * CV 尾正学间隔：|ibat|≤CV_IBAT 且 V≥CV_MV 时用此值（更快爬向近满）。
+ */
+#ifndef W20_BAT_SOC_ALIGN_LEARN_MS_CHG_CV
+#define W20_BAT_SOC_ALIGN_LEARN_MS_CHG_CV 2000u
+#endif
+/** CV 尾判定：|ibat| 不超过此 mA（含符号绝对值）。 */
+#ifndef W20_BAT_SOC_ALIGN_CV_IBAT_MA
+#define W20_BAT_SOC_ALIGN_CV_IBAT_MA 250
+#endif
+/** CV 尾判定：VBAT/IP 电压至少此 mV。 */
+#ifndef W20_BAT_SOC_ALIGN_CV_MV
+#define W20_BAT_SOC_ALIGN_CV_MV 4150
+#endif
+/**
+ * IP 读失败后仍视为插电的最长保持（ms）。期间正 bias 不衰、棘轮保留；
+ * 成功读到无 VBUS 立即清。真拔电且 IP 仍应答则无此延迟。
+ */
+#ifndef W20_BAT_SOC_ALIGN_VBUS_HOLD_MS
+#define W20_BAT_SOC_ALIGN_VBUS_HOLD_MS 30000u
+#endif
 /** IP 离线后 bias 向 0 衰减间隔（跟回 CW，避免钉在 -25 假低电）。 */
 #ifndef W20_BAT_SOC_ALIGN_DECAY_MS
 #define W20_BAT_SOC_ALIGN_DECAY_MS 4000u
 #endif
 /**
+ * 拔电后 VBAT≥此 mV：正 bias 不衰减（勿跟回 CW 裸拉伸）。
+ * 默认 3.6V：整段中高电量都信 VBAT 纠偏；电压落到阈值以下才衰回 CW。
+ */
+#ifndef W20_BAT_SOC_ALIGN_HOLD_BIAS_MV
+#define W20_BAT_SOC_ALIGN_HOLD_BIAS_MV 3600
+#endif
+/**
  * 静载 VBAT 软参考：仅 |ibat| 小、非 VBUS、大电流结束后已 settle 时，
  * 用轻载 LUT(VBAT) 作阶段性纠正（不替代 CW/IP，只慢拉偏大的 UI）。
+ * 有效区与 HOLD 一致：≥3.6V 采信；近满另有 REST 地板。
  */
 #ifndef W20_BAT_SOC_ALIGN_VBAT_REF
 #define W20_BAT_SOC_ALIGN_VBAT_REF 1
@@ -232,9 +309,16 @@
 #ifndef W20_BAT_SOC_ALIGN_QUIET_IBAT_MA
 #define W20_BAT_SOC_ALIGN_QUIET_IBAT_MA 250
 #endif
+/**
+ * IP 离线无 ibat 时：仍允许静载 VBAT 参考（假定无大电流）。
+ * 关闭则恢复旧行为（无 ibat 永不 quiet → 拔电 NACK 后无法用 V 校准）。
+ */
+#ifndef W20_BAT_SOC_ALIGN_QUIET_NO_IBAT
+#define W20_BAT_SOC_ALIGN_QUIET_NO_IBAT 1
+#endif
 /** 连续静载满此时长才采信 VBAT（ms）。 */
 #ifndef W20_BAT_SOC_ALIGN_QUIET_HOLD_MS
-#define W20_BAT_SOC_ALIGN_QUIET_HOLD_MS 8000u
+#define W20_BAT_SOC_ALIGN_QUIET_HOLD_MS 4000u
 #endif
 /** 离开大电流后再等此时长，电压回弹后再信 VBAT（ms）。 */
 #ifndef W20_BAT_SOC_ALIGN_HEAVY_SETTLE_MS
@@ -245,13 +329,27 @@
 #define W20_BAT_SOC_ALIGN_VBAT_GAP_MIN 8
 #endif
 #ifndef W20_BAT_SOC_ALIGN_VBAT_LEARN_MS
-#define W20_BAT_SOC_ALIGN_VBAT_LEARN_MS 5000u
+#define W20_BAT_SOC_ALIGN_VBAT_LEARN_MS 3000u
 #endif
 #ifndef W20_BAT_SOC_ALIGN_VBAT_EMA_DIV
-#define W20_BAT_SOC_ALIGN_VBAT_EMA_DIV 24
+#define W20_BAT_SOC_ALIGN_VBAT_EMA_DIV 16
 #endif
 #ifndef W20_BAT_SOC_ALIGN_VBAT_MAX_STEP
 #define W20_BAT_SOC_ALIGN_VBAT_MAX_STEP 1
+#endif
+/**
+ * 静载纠偏且 VBAT≥HOLD_BIAS_MV（默认≥3.6V）时：bias 可用此上限（≥BIAS_MAX），
+ * 以便从 CW 拉伸偏低拉到 LUT / 近满地板。
+ */
+#ifndef W20_BAT_SOC_ALIGN_VBAT_BIAS_MAX
+#define W20_BAT_SOC_ALIGN_VBAT_BIAS_MAX 36
+#endif
+/**
+ * 开机/拔电后：静载确认 VBAT 时一次性把 bias（及已显示的 UI）对齐到 LUT，
+ * 避免「没充电却慢慢涨」的观感。关闭则仅保留慢纠。
+ */
+#ifndef W20_BAT_SOC_ALIGN_VBAT_BOOT_SNAP
+#define W20_BAT_SOC_ALIGN_VBAT_BOOT_SNAP 1
 #endif
 /** CW 拉伸% ≤ 此值视为见底：不学正 bias，且 apply 时正 bias 贡献为 0。 */
 #ifndef W20_BAT_SOC_ALIGN_EMPTY_CW_PCT

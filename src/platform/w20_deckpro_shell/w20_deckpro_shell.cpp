@@ -19,6 +19,7 @@
 #include "mesh/NodeDB.h"
 #include "utilities.h"
 #include <Arduino.h>
+#include <esp_sleep.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -26,8 +27,8 @@
 #include <SPI.h>
 #include <TouchDrvCST3530.hpp>
 #include <Wire.h>
-#include <gdeq/GxEPD2_310_DEPG0310BxU253.h>
 #include <cstring>
+#include <gdeq/GxEPD2_310_DEPG0310BxU253.h>
 #include <lvgl.h>
 
 #include "factory.h"
@@ -85,7 +86,31 @@ static uint32_t s_epd_nav_touch_lock_ms = 0;
 static volatile bool s_epd_pixels_shown = false;
 /** prepare_subscreen 已 gen++，随后 render_start 勿再加，避免 worker gen 对不上卡死 busy。 */
 static volatile bool s_epd_nav_gen_primed = false;
+/**
+ * 刷屏在途时合并后续 FULL：只作废一次（gen++ 一次），之后只标 dirty，
+ * 当前 job 结束后用最新 decodebuffer 再刷一帧，避免 gen mismatch 连环 FULL。
+ * dirty 仅在「worker 已接手 / 已在 coalesce」时置位；空闲 prepare 不得标 dirty，
+ * 否则单次进页会固定「刷完 → one more」闪两次。
+ */
+static volatile bool s_epd_coalesce_active = false;
+static volatile bool s_epd_coalesce_dirty = false;
+/** snapshot 已交给 worker（或 sync 刷在途）；用于区分「尚未提交」与「真在刷」。 */
+static volatile bool s_epd_job_submitted = false;
+/** 补发点击短窗：挡住 PRESSED 重绘启动 EPD（须在 dips_render_start_cb 之前可见）。 */
+static uint32_t s_touch_replay_epd_gate_ms = 0;
 int disp_refr_mode = DISP_REFR_MODE_PART;
+
+static bool w20_touch_replay_epd_gated(void)
+{
+    if (s_touch_replay_epd_gate_ms == 0) {
+        return false;
+    }
+    if ((int32_t)(millis() - s_touch_replay_epd_gate_ms) >= 0) {
+        s_touch_replay_epd_gate_ms = 0;
+        return false;
+    }
+    return true;
+}
 
 static void w20_epd_mark_pixels_shown(void)
 {
@@ -515,6 +540,9 @@ void w20_deckpro_sleep_prompt_flush(void)
     s_epd_flush_suppressed = false;
     factory_pause_flush_timer();
     s_epd_flush_pending = false;
+    s_epd_coalesce_active = false;
+    s_epd_coalesce_dirty = false;
+    s_epd_job_submitted = false;
     s_epd_flush_done = true;
     w20_deckpro_epd_drain();
 
@@ -583,6 +611,9 @@ void w20_deckpro_sleep_prompt_flush(void)
     w20_deckpro_epd_lock();
     w20_deckpro_epd_do_flush(decodebuffer, LV_HOR_RES, LV_VER_RES, true, &elapsed, s_epd_flush_gen);
     w20_deckpro_epd_unlock();
+    s_epd_coalesce_active = false;
+    s_epd_coalesce_dirty = false;
+    s_epd_job_submitted = false;
     s_epd_flush_done = true;
     s_epd_flush_pending = false;
 
@@ -647,12 +678,24 @@ static void epd_flush_worker_task(void *param)
                 lv_timer_pause(flush_timer);
             }
             if (job_gen == s_epd_flush_gen) {
-                s_epd_flush_done = true;
-                w20_epd_mark_pixels_shown();
+                if (s_epd_coalesce_dirty) {
+                    /* 同 gen 期间 UI 又变了：只再刷一帧最新 buffer，勿连环 gen++ */
+                    s_epd_coalesce_dirty = false;
+                    s_epd_flush_pending = true;
+                    W20_UI_LOG("epd_flush coalesce dirty -> one more (gen=%lu)",
+                               (unsigned long)s_epd_flush_gen);
+                } else {
+                    s_epd_coalesce_active = false;
+                    s_epd_job_submitted = false;
+                    s_epd_flush_done = true;
+                    w20_epd_mark_pixels_shown();
+                }
             } else if (!s_epd_flush_pending) {
-                /* 旧 job 被 prepare gen++ 作废：用当前 buffer 再刷一帧，避免 flush_done 永不置位 */
+                /* 旧 job 被 prepare gen++ 作废：再刷最新 buffer（LVGL 应已画完；见 flush_if_pending 忙时不叠交） */
                 W20_UI_LOG("epd_flush gen mismatch job=%lu cur=%lu -> retry", (unsigned long)job_gen,
                            (unsigned long)s_epd_flush_gen);
+                /* retry 用最新 decodebuffer；清 dirty，避免再叠一帧 */
+                s_epd_coalesce_dirty = false;
                 s_epd_flush_pending = true;
             }
 
@@ -660,8 +703,9 @@ static void epd_flush_worker_task(void *param)
                 break;
             }
             s_epd_flush_pending = false;
-            /* mismatch 重试时若像素未上屏，强制 FULL，避免只 PART 半页 */
-            s_epd_job_full = !s_epd_pixels_shown || (disp_refr_mode == DISP_REFR_MODE_FULL);
+            /* 收尾/重试：强制 FULL，避免只 PART 半页 */
+            s_epd_job_full = true;
+            disp_refr_mode = DISP_REFR_MODE_FULL;
             s_epd_worker_job_gen = s_epd_flush_gen;
             if (decodebuffer != nullptr && s_epd_flush_snapshot != nullptr && s_epd_flush_snapshot_bytes > 0) {
                 memcpy(s_epd_flush_snapshot, decodebuffer, s_epd_flush_snapshot_bytes);
@@ -708,6 +752,19 @@ static void w20_deckpro_epd_flush_if_pending(void)
     if (!s_epd_flush_pending) {
         return;
     }
+#if W20_EPD_ASYNC_FLUSH
+    /*
+     * worker 正在刷：禁止再 memcpy snapshot / NotifyGive。
+     * 否则会撕坏在途帧（Battery 退出乱屏：pop 时 flush_timer 叠交提交）。
+     * 只标 dirty，等当前 job 结束走 coalesce one-more / gen mismatch retry。
+     */
+    if (s_epd_job_submitted) {
+        s_epd_coalesce_active = true;
+        s_epd_coalesce_dirty = true;
+        s_epd_flush_pending = false;
+        return;
+    }
+#endif
     s_epd_flush_pending = false;
 
     lv_coord_t w = LV_HOR_RES;
@@ -720,6 +777,7 @@ static void w20_deckpro_epd_flush_if_pending(void)
 
 #if W20_EPD_ASYNC_FLUSH
     if (s_epd_worker_task == nullptr || s_epd_flush_snapshot == nullptr) {
+        s_epd_job_submitted = true;
         w20_deckpro_epd_lock();
         uint32_t elapsed = 0;
         w20_deckpro_epd_do_flush(decodebuffer, w, h, full, &elapsed, job_gen);
@@ -736,8 +794,17 @@ static void w20_deckpro_epd_flush_if_pending(void)
             lv_timer_pause(flush_timer);
         }
         if (job_gen == s_epd_flush_gen) {
-            s_epd_flush_done = true;
-            w20_epd_mark_pixels_shown();
+            if (s_epd_coalesce_dirty) {
+                s_epd_coalesce_dirty = false;
+                s_epd_flush_pending = true;
+                W20_UI_LOG("epd_flush coalesce dirty -> one more (gen=%lu)",
+                           (unsigned long)s_epd_flush_gen);
+            } else {
+                s_epd_coalesce_active = false;
+                s_epd_job_submitted = false;
+                s_epd_flush_done = true;
+                w20_epd_mark_pixels_shown();
+            }
         }
         return;
     }
@@ -747,9 +814,11 @@ static void w20_deckpro_epd_flush_if_pending(void)
     if (decodebuffer != nullptr && s_epd_flush_snapshot_bytes > 0) {
         memcpy(s_epd_flush_snapshot, decodebuffer, s_epd_flush_snapshot_bytes);
     }
+    s_epd_job_submitted = true;
     xTaskNotifyGive(s_epd_worker_task);
     return;
 #else
+    s_epd_job_submitted = true;
     w20_deckpro_epd_lock();
     uint32_t elapsed = 0;
     w20_deckpro_epd_do_flush(decodebuffer, w, h, full, &elapsed, job_gen);
@@ -768,8 +837,17 @@ static void w20_deckpro_epd_flush_if_pending(void)
         lv_timer_pause(flush_timer);
     }
     if (job_gen == s_epd_flush_gen) {
-        s_epd_flush_done = true;
-        w20_epd_mark_pixels_shown();
+        if (s_epd_coalesce_dirty) {
+            s_epd_coalesce_dirty = false;
+            s_epd_flush_pending = true;
+            W20_UI_LOG("epd_flush coalesce dirty -> one more (gen=%lu)",
+                       (unsigned long)s_epd_flush_gen);
+        } else {
+            s_epd_coalesce_active = false;
+            s_epd_job_submitted = false;
+            s_epd_flush_done = true;
+            w20_epd_mark_pixels_shown();
+        }
     }
 #endif
 }
@@ -803,23 +881,38 @@ static void dips_render_start_cb(lv_disp_drv_t *disp_drv)
         factory_pause_flush_timer();
         return;
     }
+    /* 补发 PR/REL：忽略列表 PRESSED 重绘；prepare 已 primed 的导航仍放行 */
+    if (w20_touch_replay_epd_gated() && !s_epd_nav_gen_primed) {
+        factory_pause_flush_timer();
+        return;
+    }
     if (s_menu_present_active) {
         /* 菜单同步刷期间只允许一次 FULL 刷墨，避免 async 下 s_epd_flush_gen 连增导致 flush_done 永不置位。 */
         if (s_epd_flush_done || s_epd_flush_pending) {
             return;
         }
     }
+    /*
+     * 仅 worker 已接手或已在 coalesce 时合并；勿用 !done（render_start 会先清 done），
+     * 否则同一次进页二次 render_start 会误标 dirty → 固定双刷。
+     */
+    const bool worker_busy = s_epd_job_submitted || s_epd_coalesce_active;
     s_epd_flush_done = false;
     s_epd_pixels_shown = false;
     s_epd_flush_pending = false;
     if (s_epd_nav_gen_primed) {
         s_epd_nav_gen_primed = false;
+    } else if (worker_busy) {
+        s_epd_coalesce_active = true;
+        s_epd_coalesce_dirty = true;
+        /* 不 gen++：当前 job 结束后用最新 buffer 再刷一帧 */
     } else {
         s_epd_flush_gen++;
     }
     static uint32_t s_render_seq = 0;
     s_render_seq++;
-    W20_UI_LOG("lv_render_start #%lu full_refresh=1", (unsigned long)s_render_seq);
+    W20_UI_LOG("lv_render_start #%lu full_refresh=1 coalesce=%d gen=%lu", (unsigned long)s_render_seq,
+               s_epd_coalesce_active ? 1 : 0, (unsigned long)s_epd_flush_gen);
     /*
      * 与 w20_cp factory.ino 一致：不在 render_start 整帧 memset。
      * 每帧清 0xFF 会让 LVGL 尚未画完时整屏先被刷成「空底」，子菜单切换易闪一帧；
@@ -902,6 +995,27 @@ static bool w20_epd_nav_touch_lock_active(void)
     return true;
 }
 
+/**
+ * 导航锁期间完整点按被吞后补发短按。
+ * 等整帧空闲再 PR；PR→REL 期间 hold 墨水，避免列表项 PRESSED 态触发中间 FULL
+ * （日志：REPLAY PR → lv_render_start → REL → Config coalesce 连环 one more）。
+ */
+static uint8_t s_touch_tap_replay = 0; /* 0=无 1=等空闲补 PR 2=下一次必须 REL */
+static lv_coord_t s_touch_tap_x = 0;
+static lv_coord_t s_touch_tap_y = 0;
+static uint32_t s_touch_tap_ms = 0;
+
+static void w20_touch_tap_replay_clear(void)
+{
+    s_touch_tap_replay = 0;
+}
+
+static bool w20_epd_idle_for_tap_replay(void)
+{
+    return s_epd_flush_done && !s_epd_flush_pending && !s_epd_job_submitted && !s_epd_coalesce_active &&
+           !s_epd_coalesce_dirty;
+}
+
 static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
 {
     (void)indev_drv;
@@ -909,40 +1023,81 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
     static lv_coord_t last_y = 0;
     static bool s_log_down = false;
 
-    /* 导航后锁到本帧 FULL 刷完：FULL≈1.3s，旧 500ms 会提前放行 → 眼看旧页、LVGL 已是新页而误点 */
     const bool suppress_lvgl =
         s_menu_present_active || ui_deckpro_lvgl_touch_suppressed() || w20_epd_nav_touch_lock_active();
     uint8_t touched = touch.getPoint(&last_x, &last_y, 1);
+
+#if W20_DECKPRO_FLIP_Y
+    const lv_coord_t lv_y = (lv_coord_t)((LCD_VER_SIZE - 1) - last_y);
+#else
+    const lv_coord_t lv_y = last_y;
+#endif
+
+    /* 已发出 PR：下一次读必须 REL；保持 hold/gate，避免中间夹 list PRESSED FULL */
+    if (s_touch_tap_replay == 2) {
+        data->state = LV_INDEV_STATE_REL;
+        data->point.x = s_touch_tap_x;
+        data->point.y = s_touch_tap_y;
+        w20_touch_tap_replay_clear();
+        s_touch_hold_epd = false;
+        /* 覆盖 click→push→prepare；超时后自动失效，避免未命中时永久挡刷 */
+        s_touch_replay_epd_gate_ms = millis() + 120u;
+        W20_TOUCH_LOG("touch REPLAY REL lv(%d,%d)\n", (int)s_touch_tap_x, (int)s_touch_tap_y);
+        return;
+    }
+
     if (suppress_lvgl) {
         data->state = LV_INDEV_STATE_REL;
         data->point.x = last_x;
-#if W20_DECKPRO_FLIP_Y
-        data->point.y = (lv_coord_t)((LCD_VER_SIZE - 1) - last_y);
-#else
-        data->point.y = last_y;
-#endif
+        data->point.y = lv_y;
         if (touched && !s_log_down) {
             s_log_down = true;
             W20_TOUCH_LOG("touch DOWN raw(%d,%d) lv(%d,%d) flip_y=%d (lvgl suppressed)\n", (int)last_x, (int)last_y,
                        (int)data->point.x, (int)data->point.y, W20_DECKPRO_FLIP_Y);
         } else if (!touched && s_log_down) {
             s_log_down = false;
-            W20_TOUCH_LOG("touch UP   raw(%d,%d) lv(%d,%d) (lvgl suppressed)\n", (int)last_x, (int)last_y, (int)data->point.x,
-                       (int)data->point.y);
+            s_touch_tap_x = last_x;
+            s_touch_tap_y = lv_y;
+            s_touch_tap_ms = millis();
+            s_touch_tap_replay = 1;
+            W20_TOUCH_LOG("touch UP   raw(%d,%d) lv(%d,%d) (lvgl suppressed, queued)\n", (int)last_x, (int)last_y,
+                       (int)data->point.x, (int)data->point.y);
         }
         return;
     }
+
+    if (s_touch_tap_replay == 1) {
+        if ((millis() - s_touch_tap_ms) > 2500u) {
+            w20_touch_tap_replay_clear();
+        } else if (touched) {
+            /* 真手指接管 */
+            w20_touch_tap_replay_clear();
+        } else if (!w20_epd_idle_for_tap_replay()) {
+            /* 仍在刷/合并：继续等，勿进页触发 coalesce */
+            data->state = LV_INDEV_STATE_REL;
+            data->point.x = s_touch_tap_x;
+            data->point.y = s_touch_tap_y;
+            return;
+        } else {
+            data->state = LV_INDEV_STATE_PR;
+            data->point.x = s_touch_tap_x;
+            data->point.y = s_touch_tap_y;
+            s_touch_tap_replay = 2;
+            s_touch_hold_epd = true;
+            factory_pause_flush_timer();
+            s_touch_replay_epd_gate_ms = millis() + 200u;
+            W20_TOUCH_LOG("touch REPLAY PR lv(%d,%d)\n", (int)s_touch_tap_x, (int)s_touch_tap_y);
+            return;
+        }
+    }
+
     if (touched) {
         data->state = LV_INDEV_STATE_PR;
     } else {
         data->state = LV_INDEV_STATE_REL;
     }
     data->point.x = last_x;
-#if W20_DECKPRO_FLIP_Y
-    data->point.y = (lv_coord_t)((LCD_VER_SIZE - 1) - last_y);
-#else
-    data->point.y = last_y;
-#endif
+    data->point.y = lv_y;
 
     if (touched && !s_log_down) {
         s_log_down = true;
@@ -1039,6 +1194,8 @@ void factory_set_epd_flush_suppressed(bool suppressed)
     s_epd_flush_suppressed = suppressed;
     if (suppressed) {
         s_epd_flush_pending = false;
+        s_epd_coalesce_active = false;
+        s_epd_coalesce_dirty = false;
         /* SoftAP 等停墨期间不会再 flush，勿一直锁触摸 */
         s_epd_nav_touch_lock = false;
         if (flush_timer != nullptr) {
@@ -1083,8 +1240,27 @@ void ui_deckpro_epd_prepare_subscreen(void)
 {
     factory_pause_flush_timer();
     s_epd_flush_pending = false;
-    /* 作废在途旧帧；标记 primed，避免紧接的 render_start 再 gen++ */
-    s_epd_flush_gen++;
+    /* 新导航作废上一次被吞的点击，避免补发打到错误页 */
+    w20_touch_tap_replay_clear();
+    s_touch_replay_epd_gate_ms = 0;
+    const bool busy = s_epd_job_submitted || !s_epd_flush_done;
+    /*
+     * 空闲：gen++，不标 dirty（否则首帧刷完必再 one more）。
+     * 忙：仅第一次 gen++ 作废在途旧页并 dirty；再导航只 dirty，避免连环 mismatch。
+     */
+    if (!busy) {
+        s_epd_flush_gen++;
+        s_epd_coalesce_active = false;
+        s_epd_coalesce_dirty = false;
+    } else if (!s_epd_coalesce_active) {
+        s_epd_flush_gen++;
+        s_epd_coalesce_active = true;
+        s_epd_coalesce_dirty = true;
+        W20_UI_LOG("epd prepare coalesce begin gen=%lu", (unsigned long)s_epd_flush_gen);
+    } else {
+        s_epd_coalesce_dirty = true;
+        W20_UI_LOG("epd prepare coalesce keep gen=%lu", (unsigned long)s_epd_flush_gen);
+    }
     s_epd_nav_gen_primed = true;
     s_epd_flush_done = false;
     s_epd_pixels_shown = false;

@@ -14,6 +14,7 @@
 #endif
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
 #include "peripheral.h"
+#include "ui_deckpro.h"
 #endif
 
 #include <Arduino.h>
@@ -1738,16 +1739,31 @@ static void provisioningWork()
 #endif
 
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
-        /* 等 UI 刷完 SoftAP 指引（~1.3s FULL）再动射频；超时也强制停墨 */
+        /*
+         * 等 Config 页 FULL 刷完再停墨/动射频。旧逻辑只等 1.6s 或已 suppress，
+         * 常在指引未上屏时强制 suppress，屏停在 WiFi 列表且用户秒退仍空跑 SoftAP。
+         */
         {
             const uint32_t t0 = millis();
-            while (!factory_epd_flush_suppressed() && (millis() - t0) < 1600u) {
-                vTaskDelay(pdMS_TO_TICKS(50));
+            while (!s_stopRequested && ui_deckpro_epd_flush_busy() && (millis() - t0) < 2200u) {
+                vTaskDelay(pdMS_TO_TICKS(40));
+            }
+            if (s_stopRequested) {
+                factory_set_epd_flush_suppressed(false);
+                W20_WIFI_LOGLN("[WiFiProv] SoftAP start aborted (stop during EPD wait)");
+                performStopInProvTask();
+                return;
             }
             factory_set_epd_flush_suppressed(true);
             W20_WIFI_LOGLN("[WiFiProv] EPD suppressed before SoftAP radio");
         }
 #endif
+
+        if (s_stopRequested) {
+            factory_set_epd_flush_suppressed(false);
+            performStopInProvTask();
+            return;
+        }
 
         /*
          * 关键 SoftAP 前在 STA 模式下选信道，避免 startSoftApPortal(scan=true) 再走
@@ -2191,10 +2207,18 @@ ui_wifi_prov_state_t ui_wifi_provisioning_get_state(void)
     return s_state;
 }
 
+void ui_wifi_provisioning_ensure_ap_ssid(void)
+{
+    if (s_apSsid[0] == '\0') {
+        meshApSsidFromMac(s_apSsid, sizeof(s_apSsid));
+    }
+}
+
 void ui_wifi_provisioning_get_ap_ssid(char *buf, size_t len)
 {
     if (!buf || len == 0)
         return;
+    ui_wifi_provisioning_ensure_ap_ssid();
     strncpy(buf, s_apSsid, len - 1);
     buf[len - 1] = '\0';
 }
@@ -2333,6 +2357,7 @@ ui_wifi_prov_state_t ui_wifi_provisioning_get_state(void)
 {
     return UI_WIFI_PROV_IDLE;
 }
+void ui_wifi_provisioning_ensure_ap_ssid(void) {}
 void ui_wifi_provisioning_get_ap_ssid(char *buf, size_t len)
 {
     if (buf && len)
