@@ -1523,13 +1523,14 @@ void w20_deckpro_shell_init(void)
 
 void w20_deckpro_shell_loop(void)
 {
+    /* 软睡中也要 poll：5min 已睡 → 继续计到 10min 真关机 */
+    w20_auto_off_poll();
     if (!w20_deck_sleep_active()) {
         ui_deckpro_poll_gesture();
         ui_deckpro_poll_power_ui();
         ui_input_ip5356_key_poll();
         w20_battery_dual_soc_log_poll();
         ui_deckpro_poll_low_batt_shutdown();
-        w20_auto_off_poll();
         if (!w20_shell_mesh_screen_allowed()) {
             ui_deckpro_poll_boot_shutdown();
         } else if (screen != nullptr) {

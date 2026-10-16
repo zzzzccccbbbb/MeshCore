@@ -10,6 +10,7 @@
 #include "platform/w20_deckpro_shell/w20_ui_debug.h"
 #include "platform/w20_deckpro/peri_power.h"
 #include "platform/w20_deckpro/peripheral.h"
+#include "platform/w20_deckpro/w20_auto_off.h"
 #include "graphics/Screen.h"
 #include "graphics/EInkDisplay2.h"
 #include "peri_lighting_led_key.h"
@@ -195,6 +196,7 @@ void w20_deck_sleep_poll_boot(void)
         W20_UI_LOG("deck_sleep boot press");
         w20_deck_sleep_arm_boot_nav_suppress();
         w20_deck_sleep_wake();
+        w20_auto_off_kick(); /* 用户唤醒重置 5/10 计时；关机路径的 wake 不 kick */
         /* 勿 EVENT_PRESS：会进 ON/POWER 且 UserButton 再发 USER_PRESS→showNextFrame 跳 messages */
     }
     s_boot_prev = boot;

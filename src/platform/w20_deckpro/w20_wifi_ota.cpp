@@ -1,6 +1,7 @@
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
 
 #include "w20_wifi_ota.h"
+#include "w20_auto_off.h"
 #include "w20_dbg_log.h"
 #include "platform/w20_deckpro_shell/w20_deck_board_sleep.h"
 #include "platform/w20_deckpro_shell/w20_deckpro_shell.h"
@@ -670,6 +671,7 @@ bool w20_wifi_ota_prepare_sta(void)
 {
     if (w20_deck_sleep_active()) {
         w20_deck_sleep_wake();
+        w20_auto_off_kick();
     }
 
     ui_wifi_menu_power_on();

@@ -42,13 +42,13 @@ void ui_deckpro_enter_board_sleep(void);
 #define SETTING_ITEM_PAD_ROW  8
 #define SETTING_ITEM_PAD_TOP  14
 #define SETTING_ITEM_CLICK_EXT 2
-/** RGB：热区贴顶并裁底，避免点到 System。 */
+/** RGB：热区贴顶并裁底，避免点到其下 Timed。 */
 #define SETTING_RGB_HIT_TRIM_BOTTOM  10
-/** About System：裁下沿给 Timed；再上探吃掉 RGB 裁底+行间距死区（日志 y≈197–207）。 */
-#define SETTING_SUB_HIT_TRIM_BOTTOM  8
-#define SETTING_SUB_HIT_SHIFT_UP     12
-/** Timed：上移 = System.trim + PAD_ROW，接住 System 下沿，不深挖 System 正文。 */
-#define SETTING_TIMED_HIT_SHIFT_UP   16
+/** Timed（在 System 之上）：裁下沿给 System；再上探吃掉 RGB 裁底+行间距死区。 */
+#define SETTING_TIMED_HIT_TRIM_BOTTOM  8
+#define SETTING_TIMED_HIT_SHIFT_UP     12
+/** About System（底行）：上移接住 Timed 下沿，不深挖 Timed 正文。 */
+#define SETTING_SUB_HIT_SHIFT_UP       16
 /** Test：行高 35、行间距 8。 */
 #define TEST_ITEM_BTN_H       35
 #define TEST_ITEM_PAD_ROW     8
@@ -977,8 +977,8 @@ static ui_setting_handle setting_handle_list[] = {
     {.name = "Power GPS",        .type=UI_SETTING_TYPE_SW,  .set_cb = ui_setting_set_gps_status,   .get_cb = ui_setting_get_gps_status},
     {.name = "Power Lora",       .type=UI_SETTING_TYPE_SW,  .set_cb = ui_setting_set_lora_status,  .get_cb = ui_setting_get_lora_status},
     {.name = "RGB Status",       .type=UI_SETTING_TYPE_RGB, .set_mode_cb = ui_setting_set_rgb_mode, .get_mode_cb = ui_setting_get_rgb_mode},
-    {.name = "About System",   .type=UI_SETTING_TYPE_SUB, .sub_id = SCREEN2_1_ID},
     {.name = "Timed Shutdown", .type=UI_SETTING_TYPE_SW,  .set_cb = w20_auto_off_set_enabled,    .get_cb = w20_auto_off_get_enabled},
+    {.name = "About System",   .type=UI_SETTING_TYPE_SUB, .sub_id = SCREEN2_1_ID},
 };
 
 static bool setting_rgb_sync_charging(bool refresh)
@@ -1242,17 +1242,17 @@ static void setting_item_create(int curr_apge)
             lv_obj_set_size(hit, lv_pct(100), hit_h > 8 ? hit_h : 8);
             lv_obj_align(hit, LV_ALIGN_TOP_LEFT, 0, 0);
             lv_obj_set_ext_click_area(hit, 0);
-        } else if (sub_row) {
-            /* System：上探盖住 RGB 下空档；下沿仍裁给 Timed */
-            const lv_coord_t shift = (lv_coord_t)SETTING_SUB_HIT_SHIFT_UP;
+        } else if (timed_sw) {
+            /* Timed：上探盖住 RGB 下空档；下沿裁给 System */
+            const lv_coord_t shift = (lv_coord_t)SETTING_TIMED_HIT_SHIFT_UP;
             const lv_coord_t hit_h =
-                row_h - (lv_coord_t)SETTING_SUB_HIT_TRIM_BOTTOM + shift;
+                row_h - (lv_coord_t)SETTING_TIMED_HIT_TRIM_BOTTOM + shift;
             lv_obj_set_size(hit, lv_pct(100), hit_h > 8 ? hit_h : 8);
             lv_obj_align(hit, LV_ALIGN_TOP_LEFT, 0, -shift);
             lv_obj_set_ext_click_area(hit, 0);
-        } else if (timed_sw) {
-            /* Timed：上移吃进 System 下空档；高度补足仍盖住本行底边 */
-            const lv_coord_t shift = (lv_coord_t)SETTING_TIMED_HIT_SHIFT_UP;
+        } else if (sub_row) {
+            /* System（底行）：上移吃进 Timed 下空档；高度补足仍盖住本行底边 */
+            const lv_coord_t shift = (lv_coord_t)SETTING_SUB_HIT_SHIFT_UP;
             lv_obj_set_size(hit, lv_pct(100), row_h + shift);
             lv_obj_align(hit, LV_ALIGN_TOP_LEFT, 0, -shift);
             lv_obj_set_ext_click_area(hit, 0);
@@ -1278,7 +1278,7 @@ static void create2(lv_obj_t *parent)
     lv_obj_set_style_border_width(setting_list, 0, LV_PART_MAIN);
     lv_obj_set_style_border_color(setting_list, DECKPRO_COLOR_FG, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(setting_list, 0, LV_PART_MAIN);
-    /* Timed 热区上探出本行时仍可命中 */
+    /* Timed/System 热区上探出本行时仍可命中 */
     lv_obj_add_flag(setting_list, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
 
     setting_num = sizeof(setting_handle_list) / sizeof(setting_handle_list[0]);
@@ -5290,6 +5290,10 @@ extern "C" void ui_deckpro_request_auto_off_shutdown(void)
     s_shutdown_low_batt_hint = false;
     s_shutdown_timed_hint = true;
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+    /* 可能已在 5min 软睡：先退出 sleep 再进关机页（恢复 Wire/EPD） */
+    if (w20_deck_sleep_active()) {
+        w20_deck_sleep_wake();
+    }
     if (w20_shell_mesh_screen_allowed()) {
         w20_shell_suppress_menu_present_once();
         ui_deckpro_exit_mesh();

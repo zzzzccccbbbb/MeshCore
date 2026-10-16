@@ -40,6 +40,7 @@
 #include "platform/w20_deckpro/w20_power_battery.h"
 #include "platform/w20_deckpro/w20_auto_off.h"
 #include "platform/w20_deckpro/ui_deckpro_port.h"
+#include "platform/w20_deckpro/peri_lighting_led_key.h"
 extern "C" void ui_deckpro_request_shutdown_from_mesh(void);
 /** 与 ui_deckpro MESH_BACK_BTN_* 热区对应；顶边贴齐屏顶（与触控热区一致）。 */
 #ifndef MESH_BACK_HINT_W
@@ -818,6 +819,11 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
 
   ((MsgPreviewScreen *) msg_preview)->addPreview(path_len, from_name, text);
   setCurrScreen(msg_preview);
+
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+  /* LoRa 收到好友/频道消息即闪灯：与是否连手机、是否软睡无关（shell 仍 poll LED） */
+  peri_lighting_lamp_flash_twice();
+#endif
 
   if (_display != NULL) {
     if (!_display->isOn() && !hasConnection()) {
