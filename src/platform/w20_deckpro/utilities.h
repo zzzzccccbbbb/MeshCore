@@ -7,7 +7,7 @@
  */
 #pragma once
 
-#define UI_T_DECK_PRO_VERSION    "v1.3-261016"  // Software version
+#define UI_T_DECK_PRO_VERSION    "v1.3-261019B"  // Software version
 #define BOARD_T_DECK_PRO_VERSION "v2.0-260812"  // Hardware version
 
 // Serial
@@ -613,7 +613,7 @@
 #endif
 #define PIN_IP5356_INT   9  // IP5356 INT
 // GPIO10 — 检测 IP5356 pin21 KEY（网名 KEY_IP）。内部上拉，按下为低。
-// KEY 复用 WLED：全程 **INPUT**，禁止 OUTPUT。
+// 默认 INPUT。0x75 不在且 BOOT 短按时短暂 OUTPUT 打唤醒脉冲，随后回到 INPUT。
 #define PIN_IP5356_KEY  10
 #define IP5356_KEY_ACTIVE_LEVEL  LOW
 

@@ -1563,6 +1563,7 @@ void w20_deckpro_shell_loop(void)
         w20_meshcore_ui_loop();
 #endif
     }
+    ui_input_boot_ip5356_wake_poll();
     peri_lighting_led_key_poll();
     delay((w20_wifi_ota_is_busy() || w20_wifi_ota_is_running()) ? 1 : 5);
 }

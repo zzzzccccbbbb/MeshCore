@@ -196,9 +196,17 @@ void ui_input_set_keypay_flag(void);
 // GPIO keys (BOOT / LED_KEY only; RST is EN)
 int ui_input_read_boot_key();   // returns 1 when pressed
 int ui_input_read_led_key();    // returns 1 when pressed
-/** IP5356 KEY @ GPIO10：INPUT，IP6802 拉低为有效；上电 init 一次。禁止 OUTPUT。 */
+/** IP5356 KEY @ GPIO10：默认 INPUT，IP6802 拉低为有效；上电 init 一次。 */
 void ui_input_ip5356_key_init(void);
 int ui_input_read_ip5356_key(void); // returns 1 when KEY low
+/**
+ * 试验：0x75 不在（拔电约 30s 后 IP5356 休眠，KEY 仍可为高）时由 BOOT 短按调用。
+ * GPIO10 短暂 OUTPUT 高→低，再回到 INPUT，并立刻重探 I2C。
+ * @return true 表示本次已打过脉冲。
+ */
+bool ui_input_ip5356_key_wake_pulse(void);
+/** shell_loop：BOOT 短按且 IP5356 不在总线上时打一拍 GPIO10。长按关机逻辑不变。 */
+void ui_input_boot_ip5356_wake_poll(void);
 /**
  * shell_loop：KEY 持续低→key_sleep；KEY 回高→清 sleep，并对开机未识别的 IP5356 限频重探。
  * 无短/长按；Battery/Test 读路径不 begin。

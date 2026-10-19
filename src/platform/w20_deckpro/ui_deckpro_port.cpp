@@ -1395,6 +1395,90 @@ static void ui_ip5356_runtime_reprobe_from_key(const char *reason)
 }
 #endif
 
+bool ui_input_ip5356_key_wake_pulse(void)
+{
+#if (PIN_IP5356_KEY < 0) || !USE_IP5356_CHARGER
+    return false;
+#else
+    /* 拔电约 30s 后芯片关 I2C，GPIO10 仍为高；不以 key_sleep（KEY 拉低）为条件 */
+    if (w20_ip5356_is_present())
+        return false;
+
+    const int before = digitalRead(PIN_IP5356_KEY);
+    Serial.printf("[KEY] wake pulse start GPIO%d level=%d (1=high)\n", PIN_IP5356_KEY, before);
+
+    /* 先抬高，看能否顶开 IP6802；再短低，模拟一次按键；随即回到输入 */
+    pinMode(PIN_IP5356_KEY, OUTPUT);
+    digitalWrite(PIN_IP5356_KEY, HIGH);
+    delay(250);
+    const int forced_high = digitalRead(PIN_IP5356_KEY);
+    Serial.printf("[KEY] wake force HIGH readback=%d\n", forced_high);
+
+    digitalWrite(PIN_IP5356_KEY, LOW);
+    delay(150);
+    const int forced_low = digitalRead(PIN_IP5356_KEY);
+    Serial.printf("[KEY] wake force LOW readback=%d\n", forced_low);
+
+    pinMode(PIN_IP5356_KEY, INPUT);
+    delay(30);
+    const int after = digitalRead(PIN_IP5356_KEY);
+    const int still_low = (after == IP5356_KEY_ACTIVE_LEVEL) ? 1 : 0;
+    Serial.printf("[KEY] wake release INPUT level=%d low=%d\n", after, still_low);
+
+    const uint32_t now = millis();
+    s_ip5356_key_raw_init = true;
+    s_ip5356_key_raw = still_low;
+    s_ip5356_key_stable = still_low;
+    s_ip5356_key_raw_ms = now;
+    s_ip5356_key_edge_ms = now;
+    if (still_low)
+        s_ip5356_key_low_ms = now;
+
+    if (!still_low) {
+        s_ip5356_key_force_cw_latched = false;
+        w20_battery_set_key_sleep_mode(false);
+        strncpy(s_ip5356_key_line, "idle", sizeof(s_ip5356_key_line) - 1);
+        s_ip5356_key_line[sizeof(s_ip5356_key_line) - 1] = '\0';
+    }
+    delay(80);
+    if (w20_ip5356_reprobe()) {
+        peri_init_st[E_PERI_IP5356] = true;
+        w20_power_battery_on_ip5356_ready();
+        Serial.println("[KEY] wake reprobe OK");
+    } else {
+        Serial.println("[KEY] wake reprobe still absent");
+    }
+    return true;
+#endif
+}
+
+void ui_input_boot_ip5356_wake_poll(void)
+{
+#if (PIN_KEY_BOOT < 0) || (PIN_IP5356_KEY < 0) || !USE_IP5356_CHARGER
+    return;
+#else
+    static int s_prev = 0;
+    static bool s_tracking = false;
+    static uint32_t s_t0 = 0;
+    const int raw = ui_input_read_boot_key();
+    if (raw && !s_prev) {
+        s_tracking = true;
+        s_t0 = millis();
+    }
+    if (!raw && s_prev && s_tracking) {
+        s_tracking = false;
+        const uint32_t dt = (uint32_t)(millis() - s_t0);
+        if (dt < 450u && !w20_ip5356_is_present()) {
+            Serial.printf("[BOOT] short %lums -> IP5356 wake pulse (0x75 absent)\n", (unsigned long)dt);
+            ui_input_ip5356_key_wake_pulse();
+        }
+    }
+    if (!raw)
+        s_tracking = false;
+    s_prev = raw;
+#endif
+}
+
 void ui_input_ip5356_key_init(void)
 {
 #if (PIN_IP5356_KEY >= 0)
