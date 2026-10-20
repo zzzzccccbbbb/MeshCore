@@ -184,6 +184,8 @@ public:
 
   // To check if there is pending work
   bool hasPendingWork() const;
+  /** 本机发出的频道文本也推给手机，否则 App 频道里看不到。 */
+  void pushLocalChannelMessage(uint8_t channel_idx, uint32_t timestamp, const char *text);
 
 private:
   void writeOKFrame();

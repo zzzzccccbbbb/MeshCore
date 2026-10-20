@@ -6,6 +6,9 @@
 
 #include "platform/w20_deckpro_shell/w20_deck_board_sleep.h"
 #include "platform/w20_deckpro_shell/w20_deckpro_shell.h"
+#if defined(MESHCORE_DECK_SHELL)
+#include "platform/w20_deckpro_shell/w20_meshcore_ui.h"
+#endif
 #include "platform/w20_deckpro_shell/w20_gps_arbiter.h"
 #include "platform/w20_deckpro_shell/w20_ui_debug.h"
 #include "platform/w20_deckpro/peri_power.h"
@@ -76,6 +79,7 @@ void w20_deck_periph_sleep_off(void)
 
     deck_rgb_off();
     ui_lighting_lamp_hw_only(false);
+    /* 关灯并停掉已在跑的 SOS。shell_loop 睡眠中仍 poll 照明键，长按可再进 SOS。 */
     peri_lighting_led_key_sync_from_ui(false);
 
 #if W20_DECK_SLEEP_WIFI_OFF
@@ -163,8 +167,15 @@ void w20_deck_sleep_wake(void)
     s_deck_sleep = false;
     s_boot_prev = ui_input_read_boot_key();
     w20_deck_periph_sleep_on();
+    const bool on_mesh = w20_shell_mesh_screen_allowed();
+#if defined(MESHCORE_DECK_SHELL)
+    if (on_mesh) {
+        /* Screen::forceDisplay 在本固件是空桩，进页时的画面由 UITask 画。 */
+        w20_meshcore_ui_on_enter();
+        w20_meshcore_ui_loop();
+    } else
+#endif
     if (screen != nullptr) {
-        const bool on_mesh = w20_shell_mesh_screen_allowed();
         if (on_mesh) {
             /* 只全刷一次：挡住随后 FIXED/顶栏电量触发的叠刷约 4s */
             w20_deck_sleep_set_defer_screen_run(true);

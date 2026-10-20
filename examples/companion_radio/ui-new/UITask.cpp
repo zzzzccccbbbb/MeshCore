@@ -445,49 +445,37 @@ public:
 #if ENV_INCLUDE_GPS == 1
     } else if (_page == HomePage::GPS) {
       LocationProvider* nmea = sensors.getLocationProvider();
-      char buf[50];
-      int y = by(18);
       bool gps_state = _task->getGPSState();
+      display.setColor(UIColor::primary_txt);
+      display.setTextSize(1);
 #ifdef PIN_GPS_SWITCH
       bool hw_gps_state = digitalRead(PIN_GPS_SWITCH);
       if (gps_state != hw_gps_state) {
-        strcpy(buf, gps_state ? "gps off(hw)" : "gps off(sw)");
+        strcpy(tmp, gps_state ? "gps off(hw)" : "gps off(sw)");
       } else {
-        strcpy(buf, gps_state ? "gps on" : "gps off");
+        strcpy(tmp, gps_state ? "gps on" : "gps off");
       }
 #else
-      strcpy(buf, gps_state ? "gps on" : "gps off");
+      strcpy(tmp, gps_state ? "gps on" : "gps off");
 #endif
-      display.setColor(UIColor::primary_txt);
-      display.drawTextLeftAlign(0, y, buf);
+      display.drawTextCentered(display.width() / 2, by(20), tmp);
       if (nmea == NULL) {
-        y = y + 12;
         display.setColor(UIColor::secondary_txt);
-        display.drawTextLeftAlign(0, y, "Can't access GPS");
+        display.drawTextCentered(display.width() / 2, by(31), "Can't access GPS");
       } else {
-        display.setColor(UIColor::primary_txt);
-        strcpy(buf, nmea->isValid()?"fix":"no fix");
-        display.drawTextRightAlign(display.width()-1, y, buf);
-        y = y + 12;
+        sprintf(tmp, "%s", nmea->isValid() ? "fix" : "no fix");
+        display.drawTextCentered(display.width() / 2, by(31), tmp);
+
         display.setColor(UIColor::secondary_txt);
-        display.drawTextLeftAlign(0, y, "sat");
-        display.setColor(UIColor::primary_txt);
-        sprintf(buf, "%d", nmea->satellitesCount());
-        display.drawTextRightAlign(display.width()-1, y, buf);
-        y = y + 12;
-        display.setColor(UIColor::secondary_txt);
-        display.drawTextLeftAlign(0, y, "pos");
-        display.setColor(UIColor::primary_txt);
-        sprintf(buf, "%.4f %.4f",
-          nmea->getLatitude()/1000000., nmea->getLongitude()/1000000.);
-        display.drawTextRightAlign(display.width()-1, y, buf);
-        y = y + 12;
-        display.setColor(UIColor::secondary_txt);
-        display.drawTextLeftAlign(0, y, "alt");
-        display.setColor(UIColor::primary_txt);
-        sprintf(buf, "%.2f", nmea->getAltitude()/1000.);
-        display.drawTextRightAlign(display.width()-1, y, buf);
-        y = y + 12;
+        sprintf(tmp, "sat: %d", nmea->satellitesCount());
+        display.drawTextCentered(display.width() / 2, by(42), tmp);
+
+        sprintf(tmp, "pos: %.4f %.4f",
+          nmea->getLatitude() / 1000000., nmea->getLongitude() / 1000000.);
+        display.drawTextCentered(display.width() / 2, by(53), tmp);
+
+        sprintf(tmp, "alt: %.2f", nmea->getAltitude() / 1000.);
+        display.drawTextCentered(display.width() / 2, by(64), tmp);
       }
 #endif
 #if UI_SENSORS_PAGE == 1
@@ -809,7 +797,7 @@ switch(t){
 
 void UITask::msgRead(int msgcount) {
   _msgcount = msgcount;
-  if (msgcount == 0) {
+  if (msgcount == 0 && home != NULL) {
     gotoHomeScreen();
   }
 }
@@ -817,8 +805,11 @@ void UITask::msgRead(int msgcount) {
 void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
   _msgcount = msgcount;
 
-  ((MsgPreviewScreen *) msg_preview)->addPreview(path_len, from_name, text);
-  setCurrScreen(msg_preview);
+  /* W20 Deck shell skips ui_task.begin() — msg_preview stays null; still notify/flash. */
+  if (msg_preview != NULL) {
+    ((MsgPreviewScreen *) msg_preview)->addPreview(path_len, from_name, text);
+    setCurrScreen(msg_preview);
+  }
 
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
   /* LoRa 收到好友/频道消息即闪灯：与是否连手机、是否软睡无关（shell 仍 poll LED） */

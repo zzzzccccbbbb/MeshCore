@@ -301,8 +301,12 @@ extern "C" void lr20xx_rx_done_irq_handler(void)
         return;
     }
 
-    apps_common_lr20xx_receive(s_context, s_rfRxBuffer, PAYLOAD_LENGTH, &size);
-    lora_recv_len = (size > sizeof(s_rfRxBuffer)) ? sizeof(s_rfRxBuffer) : (size_t)size;
+    memset(s_rfRxBuffer, 0, sizeof(s_rfRxBuffer));
+    apps_common_lr20xx_receive(s_context, s_rfRxBuffer, sizeof(s_rfRxBuffer), &size);
+    if (size > sizeof(s_rfRxBuffer)) {
+        size = sizeof(s_rfRxBuffer);
+    }
+    lora_recv_len = (size_t)size;
     lora_recv_success = true;
     lora_recv_data = "";
     if (lora_recv_len > 0) {
@@ -314,6 +318,8 @@ extern "C" void lr20xx_rx_done_irq_handler(void)
     }
     lora_recv_rssi = (int)g_rfRssi;
     lora_recv_snr = g_rfSnr;
+    W20_LORA_LOG("[LoRa] RX ok len=%u rssi=%d snr=%.1f text='%.*s'\n", (unsigned)lora_recv_len, lora_recv_rssi,
+                  (double)lora_recv_snr, (int)lora_recv_len, lora_recv_data.c_str());
 
     lr20xx_radio_common_set_rx(s_context, 0);
     s_rx_done = true;
@@ -326,6 +332,7 @@ extern "C" void lr20xx_crc_error_irq_handler(void)
     if (lora_mode_is_cw(lora_mode) || !s_context) {
         return;
     }
+    Serial.printf("[LoRa] RX CRC error (heard energy, bad CRC)\n");
     lr20xx_radio_fifo_clear_rx(s_context);
     lr20xx_radio_common_set_rx(s_context, 0);
 }
@@ -361,8 +368,8 @@ bool lora_init(void)
 #ifndef W20_LORA_HAS_TCXO
 #define W20_LORA_HAS_TCXO 1
 #endif
-    Serial.printf("[LoRa] crystal cfg: W20_LORA_HAS_TCXO=%d (%s)\n", (int)W20_LORA_HAS_TCXO,
-                  W20_LORA_HAS_TCXO ? "active TCXO" : "passive XTAL");
+    W20_LORA_LOG("[LoRa] crystal cfg: W20_LORA_HAS_TCXO=%d (%s)\n", (int)W20_LORA_HAS_TCXO,
+                 W20_LORA_HAS_TCXO ? "active TCXO" : "passive XTAL");
 
     /* 探测 TCXO/XOSC 一次；失败只打日志，不阻断后续 TX */
     lora_xosc_probe_once("boot");

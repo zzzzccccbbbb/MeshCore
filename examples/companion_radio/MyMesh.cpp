@@ -1,7 +1,17 @@
 #include "MyMesh.h"
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+#include "platform/w20_deckpro_shell/w20_sos_beacon.h"
+#include "platform/w20_deckpro/w20_dbg_log.h"
+#endif
 
 #include <Arduino.h> // needed for PlatformIO
 #include <Mesh.h>
+#include <math.h>
+
+#if !(defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL))
+#define W20_MESH_LOG(...) ((void)0)
+#define W20_MESH_LOGLN(s) ((void)0)
+#endif
 
 #define CMD_APP_START                 1
 #define CMD_SEND_TXT_MSG              2
@@ -525,6 +535,9 @@ void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pk
 void MyMesh::onMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
                            const char *text) {
   markConnectionActive(from); // in case this is from a server, and we have a connection
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+  w20_sos_on_peer_message();
+#endif
   queueMessage(from, TXT_TYPE_PLAIN, pkt, sender_timestamp, NULL, 0, text);
 }
 
@@ -542,8 +555,51 @@ void MyMesh::onSignedMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uin
   queueMessage(from, TXT_TYPE_SIGNED_PLAIN, pkt, sender_timestamp, sender_prefix, 4, text);
 }
 
+void MyMesh::pushLocalChannelMessage(uint8_t channel_idx, uint32_t timestamp, const char *text) {
+  if (text == nullptr) {
+    return;
+  }
+  int i = 0;
+  if (app_target_ver >= 3) {
+    out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV_V3;
+    out_frame[i++] = 0;
+    out_frame[i++] = 0;
+    out_frame[i++] = 0;
+  } else {
+    out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV;
+  }
+  out_frame[i++] = channel_idx;
+  out_frame[i++] = 0; // flood, no extra path
+  out_frame[i++] = TXT_TYPE_PLAIN;
+  memcpy(&out_frame[i], &timestamp, 4);
+  i += 4;
+  int tlen = strlen(text);
+  if (i + tlen > MAX_FRAME_SIZE) {
+    tlen = MAX_FRAME_SIZE - i;
+  }
+  memcpy(&out_frame[i], text, tlen);
+  i += tlen;
+  addToOfflineQueue(out_frame, i);
+  if (_serial->isConnected()) {
+    uint8_t frame[1];
+    frame[0] = PUSH_CODE_MSG_WAITING;
+    _serial->writeFrame(frame, 1);
+  }
+}
+
 void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint32_t timestamp,
                                   const char *text) {
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+  w20_sos_on_channel_text(text);
+#endif
+  {
+    uint8_t idx = findChannelIdx(channel);
+    ChannelDetails ch;
+    const char *name = getChannel(idx, ch) ? ch.name : "?";
+    W20_MESH_LOG("[CH] RX idx=%u name=%s hash=%02X snr=%.1f radio=%.3f/%.1f/SF%u text=%s\n", (unsigned)idx,
+                 name, channel.hash[0], pkt ? pkt->getSNR() : 0.0f, _prefs.freq, _prefs.bw,
+                 (unsigned)_prefs.sf, text ? text : "");
+  }
   int i = 0;
   if (app_target_ver >= 3) {
     out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV_V3;
@@ -948,6 +1004,22 @@ void MyMesh::begin(bool has_display) {
   _prefs.gps_enabled = constrain(_prefs.gps_enabled, 0, 1);  // Ensure boolean 0 or 1
   _prefs.gps_interval = constrain(_prefs.gps_interval, 0, 86400);  // Max 24 hours
 
+#if defined(W20_MESH_FORCE_DECK_RADIO) && W20_MESH_FORCE_DECK_RADIO
+  /* Deck P2P 已验证的空口；避免两台设备 App 历史 prefs 不一致。 */
+  const bool radio_mismatch =
+      fabsf(_prefs.freq - (float)LORA_FREQ) > 0.001f || fabsf(_prefs.bw - (float)LORA_BW) > 0.01f ||
+      _prefs.sf != (uint8_t)LORA_SF || _prefs.cr != (uint8_t)LORA_CR;
+  if (radio_mismatch) {
+    W20_MESH_LOG("[RADIO] force deck defaults was f=%.3f/%.1f/SF%u -> %.3f/%.1f/SF%u\n", _prefs.freq, _prefs.bw,
+                 (unsigned)_prefs.sf, (float)LORA_FREQ, (float)LORA_BW, (unsigned)LORA_SF);
+    _prefs.freq = (float)LORA_FREQ;
+    _prefs.bw = (float)LORA_BW;
+    _prefs.sf = (uint8_t)LORA_SF;
+    _prefs.cr = (uint8_t)LORA_CR;
+    savePrefs();
+  }
+#endif
+
 #ifdef BLE_PIN_CODE // 123456 by default
   if (_prefs.ble_pin == 0) {
 #ifdef DISPLAY_CLASS
@@ -980,6 +1052,9 @@ void MyMesh::begin(bool has_display) {
   board.setLoRaFemPaGainEnabled(_prefs.radio_fem_txgain);
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
                      radio_driver.getRxBoostedGainMode() ? "Enabled" : "Disabled");
+  W20_MESH_LOG("[RADIO] boot f=%.3f bw=%.1f sf=%u cr=%u tx=%ddBm repeat=%d\n", _prefs.freq, _prefs.bw,
+               (unsigned)_prefs.sf, (unsigned)_prefs.cr, (int)_prefs.tx_power_dbm,
+               _prefs.isRepeatEn() ? 1 : 0);
 }
 
 const char *MyMesh::getNodeName() {
@@ -1046,6 +1121,8 @@ void MyMesh::handleCmdFrame(size_t len) {
     char *app_name = (char *)&cmd_frame[8];
     cmd_frame[len] = 0; // make app_name null terminated
     MESH_DEBUG_PRINTLN("App %s connected", app_name);
+    W20_MESH_LOG("[RADIO] app_start f=%.3f bw=%.1f sf=%u cr=%u tx=%ddBm name=%s\n", _prefs.freq, _prefs.bw,
+                 (unsigned)_prefs.sf, (unsigned)_prefs.cr, (int)_prefs.tx_power_dbm, _prefs.node_name);
 
     _iter_started = false; // stop any left-over ContactsIterator
     int i = 0;
@@ -1138,13 +1215,20 @@ void MyMesh::handleCmdFrame(size_t len) {
     const char *text = (char *)&cmd_frame[i];
 
     if (txt_type != TXT_TYPE_PLAIN) {
+      W20_MESH_LOG("[CH] TX reject: txt_type=%u\n", (unsigned)txt_type);
       writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
     } else {
       ChannelDetails channel;
       bool success = getChannel(channel_idx, channel);
-      if (success && sendGroupMessage(msg_timestamp, channel.channel, _prefs.node_name, text, len - i)) {
+      const int text_len = (int)(len - i);
+      if (success && sendGroupMessage(msg_timestamp, channel.channel, _prefs.node_name, text, text_len)) {
+        W20_MESH_LOG("[CH] TX ok idx=%u name=%s hash=%02X key4=%02X%02X%02X%02X radio=%.3f/%.1f/SF%u text=%.*s\n",
+                     (unsigned)channel_idx, channel.name, channel.channel.hash[0], channel.channel.secret[0],
+                     channel.channel.secret[1], channel.channel.secret[2], channel.channel.secret[3],
+                     _prefs.freq, _prefs.bw, (unsigned)_prefs.sf, text_len, text);
         writeOKFrame();
       } else {
+        W20_MESH_LOG("[CH] TX fail idx=%u get=%d\n", (unsigned)channel_idx, (int)success);
         writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx
       }
     }
@@ -1392,34 +1476,51 @@ void MyMesh::handleCmdFrame(size_t len) {
     }
 
     if (repeat && !isValidClientRepeatFreq(freq)) {
+      W20_MESH_LOG("[RADIO] SET reject: invalid repeat freq=%u\n", (unsigned)freq);
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     } else if (freq >= 150000 && freq <= 2500000 && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 && bw >= 7000 &&
         bw <= 500000) {
+#if defined(W20_MESH_FORCE_DECK_RADIO) && W20_MESH_FORCE_DECK_RADIO
+      W20_MESH_LOG("[RADIO] SET ignored app f=%u bw=%u sf=%u -> force deck %.3f/%.1f/SF%u\n", (unsigned)freq,
+                   (unsigned)bw, (unsigned)sf, (float)LORA_FREQ, (float)LORA_BW, (unsigned)LORA_SF);
+      _prefs.freq = (float)LORA_FREQ;
+      _prefs.bw = (float)LORA_BW;
+      _prefs.sf = (uint8_t)LORA_SF;
+      _prefs.cr = (uint8_t)LORA_CR;
+#else
       _prefs.sf = sf;
       _prefs.cr = cr;
       _prefs.freq = (float)freq / 1000.0;
       _prefs.bw = (float)bw / 1000.0;
+#endif
       _prefs.setRepeatEn(repeat != 0);
       savePrefs();
 
       radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
       MESH_DEBUG_PRINTLN("OK: CMD_SET_RADIO_PARAMS: f=%d, bw=%d, sf=%d, cr=%d", freq, bw, (uint32_t)sf,
                          (uint32_t)cr);
+      W20_MESH_LOG("[RADIO] SET ok f=%.3f bw=%.1f sf=%u cr=%u repeat=%u (raw f=%u bw=%u)\n", _prefs.freq,
+                   _prefs.bw, (unsigned)_prefs.sf, (unsigned)_prefs.cr, (unsigned)repeat, (unsigned)freq,
+                   (unsigned)bw);
 
       writeOKFrame();
     } else {
       MESH_DEBUG_PRINTLN("Error: CMD_SET_RADIO_PARAMS: f=%d, bw=%d, sf=%d, cr=%d", freq, bw, (uint32_t)sf,
                          (uint32_t)cr);
+      W20_MESH_LOG("[RADIO] SET fail f=%u bw=%u sf=%u cr=%u\n", (unsigned)freq, (unsigned)bw, (unsigned)sf,
+                   (unsigned)cr);
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     }
   } else if (cmd_frame[0] == CMD_SET_RADIO_TX_POWER) {
     int8_t power = (int8_t)cmd_frame[1];
     if (power < -9 || power > MAX_LORA_TX_POWER) {
+      W20_MESH_LOG("[RADIO] TXPWR reject %d\n", (int)power);
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     } else {
       _prefs.tx_power_dbm = power;
       savePrefs();
       radio_driver.setTxPower(_prefs.tx_power_dbm);
+      W20_MESH_LOG("[RADIO] TXPWR ok %ddBm\n", (int)_prefs.tx_power_dbm);
       writeOKFrame();
     }
   } else if (cmd_frame[0] == CMD_SET_TUNING_PARAMS) {
@@ -1715,11 +1816,15 @@ void MyMesh::handleCmdFrame(size_t len) {
       i += 32;
       memcpy(&out_frame[i], channel.channel.secret, 16);
       i += 16; // NOTE: only 128-bit supported
+      W20_MESH_LOG("[CH] GET idx=%u name=%s hash=%02X key4=%02X%02X%02X%02X\n", (unsigned)channel_idx,
+                   channel.name, channel.channel.hash[0], channel.channel.secret[0], channel.channel.secret[1],
+                   channel.channel.secret[2], channel.channel.secret[3]);
       _serial->writeFrame(out_frame, i);
     } else {
       writeErrFrame(ERR_CODE_NOT_FOUND);
     }
   } else if (cmd_frame[0] == CMD_SET_CHANNEL && len >= 2 + 32 + 32) {
+    W20_MESH_LOG("[CH] SET reject: 256-bit key not supported (len=%u)\n", (unsigned)len);
     writeErrFrame(ERR_CODE_UNSUPPORTED_CMD); // not supported (yet)
   } else if (cmd_frame[0] == CMD_SET_CHANNEL && len >= 2 + 32 + 16) {
     uint8_t channel_idx = cmd_frame[1];
@@ -1729,8 +1834,15 @@ void MyMesh::handleCmdFrame(size_t len) {
     memcpy(channel.channel.secret, &cmd_frame[2 + 32], 16); // NOTE: only 128-bit supported
     if (setChannel(channel_idx, channel)) {
       saveChannels();
+      // re-read so hash is the stored value
+      ChannelDetails stored;
+      getChannel(channel_idx, stored);
+      W20_MESH_LOG("[CH] SET ok idx=%u name=%s hash=%02X key4=%02X%02X%02X%02X\n", (unsigned)channel_idx,
+                   stored.name, stored.channel.hash[0], stored.channel.secret[0], stored.channel.secret[1],
+                   stored.channel.secret[2], stored.channel.secret[3]);
       writeOKFrame();
     } else {
+      W20_MESH_LOG("[CH] SET fail idx=%u\n", (unsigned)channel_idx);
       writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx
     }
   } else if (cmd_frame[0] == CMD_SIGN_START) {

@@ -22,7 +22,13 @@ AutoDiscoverRTCClock rtc_clock(fallback_clock);
 
 #if ENV_INCLUDE_GPS
   #include <helpers/sensors/MicroNMEALocationProvider.h>
+  #if defined(MESHNOLOGY_W20)
+  #include "platform/w20_deckpro/utilities.h"
+  /* 与 w20_meshtastic 相同：L76K 在 UART2。EN 仍由 Setting Power GPS 管，这里不拉 EN。 */
+  MicroNMEALocationProvider nmea = MicroNMEALocationProvider(SerialGPS, &rtc_clock, -1, -1);
+  #else
   MicroNMEALocationProvider nmea = MicroNMEALocationProvider(Serial1, &rtc_clock);
+  #endif
   EnvironmentSensorManager sensors = EnvironmentSensorManager(nmea);
 #else
   EnvironmentSensorManager sensors;

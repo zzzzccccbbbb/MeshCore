@@ -443,28 +443,29 @@ void apps_common_lr20xx_system_init( const lr20xx_hal_context_t* context )
     const lr20xx_system_reg_mode_t* regulator = smtc_shield_lr20xx_get_reg_mode();
     ASSERT_LR20XX_RC( lr20xx_system_set_reg_mode( (void*) context, *regulator ) );
 
-    /* TCXO / 无源晶振：shield 提供默认，W20_LORA_HAS_TCXO 可强制覆盖
-     * （避免 PlatformIO file:// libdeps 缓存旧 shield 仍硬编码 has_tcxo=true）。 */
+    /* 有源/无源只认编译宏 W20_LORA_HAS_TCXO（platformio -D）：
+     * 1 = 有源 TCXO → set_tcxo_mode；0 = 无源 XTAL → 跳过。
+     * supply/startup 仍取自 shield；宏为唯一开关，避免与旧 has_tcxo 缓存打架。 */
 #ifndef W20_LORA_HAS_TCXO
 #define W20_LORA_HAS_TCXO 1
 #endif
     const smtc_shield_lr20xx_xosc_cfg_t* tcxo_cfg = smtc_shield_lr20xx_get_xosc_cfg();
 #if W20_LORA_HAS_TCXO
-    const bool use_tcxo = ( tcxo_cfg->has_tcxo == true );
+    {
+        lr20xx_system_tcxo_supply_voltage_t supply = tcxo_cfg->supply;
+        uint32_t startup = tcxo_cfg->startup_time_in_tick;
+        if( startup == 0 ) {
+            startup = 160000; /* ~5ms @ 32MHz */
+        }
+        ASSERT_LR20XX_RC( lr20xx_system_set_tcxo_mode( context, supply, startup ) );
+        HAL_DBG_TRACE_INFO( "XOSC: active TCXO (W20_LORA_HAS_TCXO=1) supply=%u startup_ticks=%lu\n",
+                            (unsigned) supply, (unsigned long) startup );
+    }
 #else
-    const bool use_tcxo = false;
+    (void) tcxo_cfg;
+    /* 无源 XTAL：不调用 set_tcxo_mode */
+    HAL_DBG_TRACE_INFO( "XOSC: passive XTAL (W20_LORA_HAS_TCXO=0)\n" );
 #endif
-    if( use_tcxo )
-    {
-        ASSERT_LR20XX_RC( lr20xx_system_set_tcxo_mode( context, tcxo_cfg->supply, tcxo_cfg->startup_time_in_tick ) );
-        HAL_DBG_TRACE_INFO( "XOSC: TCXO enabled supply=%u startup_ticks=%lu\n", (unsigned) tcxo_cfg->supply,
-                            (unsigned long) tcxo_cfg->startup_time_in_tick );
-    }
-    else
-    {
-        /* 无源 XTAL：对齐 demo，仅跳过 set_tcxo_mode，不调 configure_xosc */
-        HAL_DBG_TRACE_INFO( "XOSC: passive crystal (TCXO disabled)\n" );
-    }
 
     const lr20xx_system_lfclk_cfg_t* lfclk_cfg = smtc_shield_lr20xx_get_lfclk_cfg();
     ASSERT_LR20XX_RC( lr20xx_system_cfg_lfclk( context, *lfclk_cfg ) );

@@ -263,8 +263,8 @@ static void power_hold_rails(void)
 void power_deck_sleep_enter_periph(void)
 {
 #if USE_TOUCH
+    /* 只睡触摸；勿 Wire.end()。软睡中主循环仍可能读 CW2217/IP5356，end 后会 NULL TX。 */
     touch.sleep();
-    Wire.end();
 #endif
 
 #if W20_DECK_SLEEP_EPD_HOLD_IMAGE

@@ -39,6 +39,9 @@
 #ifndef W20_LOG_SOS
 #define W20_LOG_SOS 0
 #endif
+#ifndef W20_LOG_MESH
+#define W20_LOG_MESH 0
+#endif
 
 /* ---------- 打印宏 ---------- */
 
@@ -78,6 +81,14 @@
 #else
 #define W20_SOS_LOG(...) ((void)0)
 #define W20_SOS_LOGLN(s) ((void)0)
+#endif
+
+#if W20_LOG_MESH
+#define W20_MESH_LOG(...) Serial.printf(__VA_ARGS__)
+#define W20_MESH_LOGLN(s) Serial.println(s)
+#else
+#define W20_MESH_LOG(...) ((void)0)
+#define W20_MESH_LOGLN(s) ((void)0)
 #endif
 
 #if W20_LOG_LED_KEY

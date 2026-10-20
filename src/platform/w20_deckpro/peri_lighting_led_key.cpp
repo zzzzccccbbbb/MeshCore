@@ -176,9 +176,10 @@ void peri_lighting_lamp_flash_twice(void)
     if (PIN_LIGHTING_LAMP < 0) {
         return;
     }
-#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
-    w20_sos_beacon_stop();
-#endif
+    /* 不在此处停 SOS：自己回环也会走 newMsg→flash，误停；停发只走 w20_sos_on_* */
+    if (lamp_mode == LED_KEY_MODE_BLINK) {
+        return; /* SOS 闪烁中：留给 on_channel_text / 按键停 */
+    }
     lamp_mode = LED_KEY_MODE_NOTIFY;
     notify_phases_left = 4;
     blink_phase_on = true;

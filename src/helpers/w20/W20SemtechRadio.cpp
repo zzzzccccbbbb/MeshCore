@@ -29,21 +29,16 @@ W20SemtechRadio *W20SemtechRadio::s_inst = nullptr;
 #define IRQ_TX (1u << 1)
 #define IRQ_ERR (1u << 2)
 
+/* Only completion / error IRQs. Preamble/sync fire too often under RF and must
+ * never drive SPI from the GPIO ISR (INT_WDT when peer TX / noise). */
 #define IRQ_MASK                                                                                                       \
   (LR20XX_SYSTEM_IRQ_RX_DONE | LR20XX_SYSTEM_IRQ_TX_DONE | LR20XX_SYSTEM_IRQ_TIMEOUT | LR20XX_SYSTEM_IRQ_CRC_ERROR |   \
-   LR20XX_SYSTEM_IRQ_PREAMBLE_DETECTED | LR20XX_SYSTEM_IRQ_SYNC_WORD_HEADER_VALID | LR20XX_SYSTEM_IRQ_LORA_HEADER_ERROR)
+   LR20XX_SYSTEM_IRQ_LORA_HEADER_ERROR)
 
 void IRAM_ATTR W20SemtechRadio::onDioIsr() {
-  if (!s_inst || !s_inst->_ctx)
+  if (!s_inst)
     return;
-  lr20xx_system_irq_mask_t irq = LR20XX_SYSTEM_IRQ_NONE;
-  lr20xx_system_get_and_clear_irq_status(s_inst->_ctx, &irq);
-  if (irq & LR20XX_SYSTEM_IRQ_RX_DONE)
-    s_inst->_irq_flags |= IRQ_RX;
-  if (irq & LR20XX_SYSTEM_IRQ_TX_DONE)
-    s_inst->_irq_flags |= IRQ_TX;
-  if (irq & (LR20XX_SYSTEM_IRQ_CRC_ERROR | LR20XX_SYSTEM_IRQ_LORA_HEADER_ERROR | LR20XX_SYSTEM_IRQ_TIMEOUT))
-    s_inst->_irq_flags |= IRQ_ERR;
+  s_inst->_dio_pending = true;
 }
 
 static lr20xx_radio_lora_sf_t map_sf(uint8_t sf) {
@@ -151,6 +146,7 @@ void W20SemtechRadio::hwStandby() {
     lr20xx_system_set_standby_mode(_ctx, LR20XX_SYSTEM_STANDBY_MODE_RC);
   _in_rx = false;
   _irq_flags = 0;
+  _dio_pending = false;
 }
 
 void W20SemtechRadio::applyModem() {
@@ -246,7 +242,14 @@ bool W20SemtechRadio::resumeAfterDeck() {
     Serial.printf("W20Semtech: resume bad FW %u.%u\n", (unsigned)ver.major, (unsigned)ver.minor);
     return false;
   }
+  const lr20xx_system_dio_t *irq_dio = smtc_shield_lr20xx_get_irq_dio();
+  const apps_common_lr20xx_irq_cfg_t irq_cfg[] = {
+      {.irq_mask = IRQ_MASK, .dio = *irq_dio},
+  };
+  apps_common_lr20xx_set_dio_irq_params(_ctx, irq_cfg, 1);
   s_inst = this;
+  _dio_pending = false;
+  _irq_flags = 0;
   lr20xx_set_mesh_dio_irq_cb(onDioIsr);
   applyModem();
   _ready = true;
@@ -264,12 +267,28 @@ void W20SemtechRadio::begin() {
 }
 
 void W20SemtechRadio::processIrq() {
-  // flags set in ISR
+  if (!_ready || !_ctx)
+    return;
+  /* Rising-edge ISR only sets a flag; DIO stays high until SPI clear — also poll. */
+  if (!_dio_pending && gpio_get_level((gpio_num_t)LORA_IRQ_PIN) == 0)
+    return;
+  _dio_pending = false;
+  lr20xx_system_irq_mask_t irq = LR20XX_SYSTEM_IRQ_NONE;
+  if (lr20xx_system_get_and_clear_irq_status(_ctx, &irq) != LR20XX_STATUS_OK)
+    return;
+  if (irq & LR20XX_SYSTEM_IRQ_RX_DONE)
+    _irq_flags |= IRQ_RX;
+  if (irq & LR20XX_SYSTEM_IRQ_TX_DONE)
+    _irq_flags |= IRQ_TX;
+  if (irq & (LR20XX_SYSTEM_IRQ_CRC_ERROR | LR20XX_SYSTEM_IRQ_LORA_HEADER_ERROR | LR20XX_SYSTEM_IRQ_TIMEOUT))
+    _irq_flags |= IRQ_ERR;
 }
 
 int W20SemtechRadio::recvRaw(uint8_t *bytes, int sz) {
   if (!_ready || !_ctx)
     return 0;
+
+  processIrq();
 
   if (_irq_flags & IRQ_ERR) {
     _irq_flags &= ~(IRQ_ERR | IRQ_RX);
@@ -363,6 +382,7 @@ bool W20SemtechRadio::startSendRaw(const uint8_t *bytes, int len) {
 }
 
 bool W20SemtechRadio::isSendComplete() {
+  processIrq();
   if (_irq_flags & IRQ_TX) {
     _irq_flags &= ~IRQ_TX;
     n_sent++;
@@ -380,6 +400,7 @@ void W20SemtechRadio::onSendFinished() {
 bool W20SemtechRadio::isReceiving() {
   if (!_ready)
     return false;
+  processIrq();
   if (_irq_flags & (IRQ_RX | IRQ_ERR))
     return true;
   // preamble / header while in RX — approximate via instant RSSI vs noise
@@ -389,7 +410,10 @@ bool W20SemtechRadio::isReceiving() {
 }
 
 void W20SemtechRadio::loop() {
-  if (!_ready || !_in_rx)
+  if (!_ready)
+    return;
+  processIrq();
+  if (!_in_rx)
     return;
   if (_nf_samples < 64 && !(_irq_flags & IRQ_RX)) {
     int rssi = (int)getCurrentRSSI();

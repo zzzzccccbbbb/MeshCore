@@ -54,6 +54,7 @@ class W20SemtechRadio : public mesh::Radio {
   uint16_t _preamble = 16;
 
   volatile uint8_t _irq_flags = 0; // bit0=RX_DONE, bit1=TX_DONE, bit2=ERR
+  volatile bool _dio_pending = false; // set in ISR; cleared in processIrq (no SPI in ISR)
   float _last_rssi = -120;
   float _last_snr = 0;
   int16_t _noise_floor = -100;

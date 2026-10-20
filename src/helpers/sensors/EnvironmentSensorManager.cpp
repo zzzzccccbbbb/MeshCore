@@ -1,6 +1,9 @@
 #include "EnvironmentSensorManager.h"
 
 #include <Wire.h>
+#if defined(MESHNOLOGY_W20)
+#include "platform/w20_deckpro/utilities.h"
+#endif
 
 #if ENV_PIN_SDA && ENV_PIN_SCL
 #define TELEM_WIRE &Wire1  // Use Wire1 as the I2C bus for Environment Sensors
@@ -749,6 +752,11 @@ bool EnvironmentSensorManager::setSettingValue(const char* name, const char* val
 #if ENV_INCLUDE_GPS
 void EnvironmentSensorManager::initBasicGPS() {
 
+#if defined(MESHNOLOGY_W20)
+  /* 上电不要求立刻有 NMEA：默认 gps 关，Mesh 页再打开。 */
+  gps_detected = true;
+  gps_active = false;
+#else
   Serial1.setPins(PIN_GPS_TX, PIN_GPS_RX);
 
   #ifdef GPS_BAUD_RATE
@@ -786,6 +794,7 @@ void EnvironmentSensorManager::initBasicGPS() {
   }
   _location->stop();
   gps_active = false; //Set GPS visibility off until setting is changed
+#endif
 }
 
 // gps code for rak might be moved to MicroNMEALoactionProvider
@@ -896,6 +905,18 @@ void EnvironmentSensorManager::start_gps() {
   _location->begin();
   _location->reset();
 
+#if defined(MESHNOLOGY_W20)
+  SerialGPS.begin(9600, SERIAL_8N1, BOARD_GPS_RXD, BOARD_GPS_TXD);
+  if (BOARD_GPS_EN >= 0) {
+    pinMode(BOARD_GPS_EN, OUTPUT);
+    digitalWrite(BOARD_GPS_EN, HIGH);
+  }
+  if (BOARD_GPS_WAKE >= 0) {
+    pinMode(BOARD_GPS_WAKE, OUTPUT);
+    digitalWrite(BOARD_GPS_WAKE, HIGH);
+  }
+#endif
+
 #ifndef PIN_GPS_EN
   MESH_DEBUG_PRINTLN("Start GPS is N/A on this board. Actual GPS state unchanged");
 #endif
@@ -912,6 +933,10 @@ void EnvironmentSensorManager::stop_gps() {
   #endif
 
   _location->stop();
+
+#if defined(MESHNOLOGY_W20)
+  SerialGPS.end();
+#endif
 
   #ifndef PIN_GPS_EN
   MESH_DEBUG_PRINTLN("Stop GPS is N/A on this board. Actual GPS state unchanged");

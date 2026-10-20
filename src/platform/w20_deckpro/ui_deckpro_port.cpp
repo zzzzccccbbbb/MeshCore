@@ -16,6 +16,7 @@
 #include "peripheral.h"
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
 #include "ui_deckpro.h"
+#include "platform/w20_deckpro_shell/w20_deck_board_sleep.h"
 #include "platform/w20_deckpro_shell/w20_lora_arbiter.h"
 #include "platform/w20_deckpro_shell/w20_gps_arbiter.h"
 #include "platform/w20_deckpro_shell/w20_power_shutdown.h"
@@ -1460,6 +1461,14 @@ void ui_input_boot_ip5356_wake_poll(void)
     static int s_prev = 0;
     static bool s_tracking = false;
     static uint32_t s_t0 = 0;
+#if defined(USE_W20_DECKPRO_SHELL)
+    /* 软睡中 BOOT 只留给 deck_sleep_poll_boot 唤醒屏幕，勿抢去做 IP5356 脉冲。 */
+    if (w20_deck_sleep_active()) {
+        s_prev = ui_input_read_boot_key();
+        s_tracking = false;
+        return;
+    }
+#endif
     const int raw = ui_input_read_boot_key();
     if (raw && !s_prev) {
         s_tracking = true;
