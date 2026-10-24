@@ -1,4 +1,6 @@
 #include "ST7789LCDDisplay.h"
+#include <stdlib.h>
+#include <string.h>
 
 #ifndef PIN_TFT_MISO
   #define PIN_TFT_MISO -1
@@ -28,6 +30,73 @@
   #define PIN_TFT_LEDA_CTL (-1)
 #endif
 
+/* ---- RGB332 back-buffer (physical panel size) ---- */
+
+uint8_t ST7789FrameGFX::pack332(uint16_t c) {
+  uint8_t r = (c >> 13) & 0x7;
+  uint8_t g = (c >> 8) & 0x7;
+  uint8_t b = (c >> 3) & 0x3;
+  return (r << 5) | (g << 2) | b;
+}
+
+uint16_t ST7789FrameGFX::unpack565(uint8_t c) {
+  uint8_t r = (c >> 5) & 0x7;
+  uint8_t g = (c >> 2) & 0x7;
+  uint8_t b = c & 0x3;
+  /* Expand 3/3/2 → 5/6/5 */
+  return (uint16_t)((r * 31 / 7) << 11) | (uint16_t)((g * 63 / 7) << 5) | (uint16_t)(b * 31 / 3);
+}
+
+ST7789FrameGFX::ST7789FrameGFX(int16_t w, int16_t h, uint8_t *buf)
+  : Adafruit_GFX(w, h), _buf(buf), _stride(w) {}
+
+void ST7789FrameGFX::drawPixel(int16_t x, int16_t y, uint16_t color) {
+  if (!_buf || x < 0 || y < 0 || x >= WIDTH || y >= HEIGHT) return;
+  _buf[(int32_t)y * _stride + x] = pack332(color);
+}
+
+void ST7789FrameGFX::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
+  if (!_buf || w <= 0 || h <= 0) return;
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x + w > WIDTH) w = WIDTH - x;
+  if (y + h > HEIGHT) h = HEIGHT - y;
+  if (w <= 0 || h <= 0) return;
+
+  uint8_t p = pack332(color);
+  for (int16_t row = y; row < y + h; row++) {
+    uint8_t *dst = _buf + (int32_t)row * _stride + x;
+    memset(dst, p, (size_t)w);
+  }
+}
+
+void ST7789FrameGFX::fillScreen(uint16_t color) {
+  if (!_buf) return;
+  memset(_buf, pack332(color), (size_t)_stride * HEIGHT);
+}
+
+void ST7789FrameGFX::blitTo(Adafruit_ST7789 &panel) {
+  if (!_buf) return;
+  const int16_t w = _stride;
+  const int16_t h = HEIGHT;
+  /* Max ST7789 panel width used by this driver (T-Deck 320). */
+  uint16_t line[320];
+  if (w > 320) return;
+
+  panel.startWrite();
+  for (int16_t y = 0; y < h; y++) {
+    const uint8_t *src = _buf + (int32_t)y * w;
+    for (int16_t x = 0; x < w; x++) {
+      line[x] = unpack565(src[x]);
+    }
+    panel.setAddrWindow(0, y, w, 1);
+    panel.writePixels(line, w);
+  }
+  panel.endWrite();
+}
+
+/* ---- Display driver ---- */
+
 bool ST7789LCDDisplay::i2c_probe(TwoWire& wire, uint8_t addr) {
   return true;
 }
@@ -42,6 +111,15 @@ ColorVal UIColor::warning_txt = ST77XX_ORANGE;
 ColorVal UIColor::popup_bkg = ST77XX_CYAN;
 ColorVal UIColor::popup_txt = ST77XX_BLACK;
 ColorVal UIColor::corp_blue = 0x001A;
+
+bool ST7789LCDDisplay::ensureFrameBuffer() {
+  if (_gfx) return true;
+  size_t nbytes = (size_t)DISPLAY_WIDTH * (size_t)DISPLAY_HEIGHT;
+  _fb = (uint8_t *)malloc(nbytes);
+  if (!_fb) return false;
+  _gfx = new ST7789FrameGFX(DISPLAY_WIDTH, DISPLAY_HEIGHT, _fb);
+  return _gfx != NULL;
+}
 
 bool ST7789LCDDisplay::begin() {
   if (!_isOn) {
@@ -69,11 +147,16 @@ bool ST7789LCDDisplay::begin() {
     display.invertDisplay(true);
 #endif
 
+    if (!ensureFrameBuffer()) {
+      return false;
+    }
+
+    _gfx->fillScreen(ST77XX_BLACK);
     display.fillScreen(ST77XX_BLACK);
-    display.setTextColor(ST77XX_WHITE);
-    display.setTextSize(2 * DISPLAY_SCALE_X); 
-    display.cp437(true); // Use full 256 char 'Code Page 437' font
-  
+    _gfx->setTextColor(ST77XX_WHITE);
+    _gfx->setTextSize(2 * DISPLAY_SCALE_X);
+    _gfx->cp437(true);
+
     _isOn = true;
   }
 
@@ -102,41 +185,50 @@ void ST7789LCDDisplay::turnOff() {
 }
 
 void ST7789LCDDisplay::clear() {
-  display.fillScreen(ST77XX_BLACK);
+  if (_gfx) _gfx->fillScreen(ST77XX_BLACK);
 }
 
 void ST7789LCDDisplay::startFrame(ColorVal bkg) {
-  display.fillScreen(bkg);
-  display.setTextColor(_color = UIColor::primary_txt);
-  display.setTextSize(1 * DISPLAY_SCALE_X); // This one affects size of Please wait... message
-  display.cp437(true); // Use full 256 char 'Code Page 437' font
+  /* Clear back-buffer only — same layout math as direct draw, no live fillScreen flash. */
+  if (!_gfx && !ensureFrameBuffer()) return;
+  _gfx->fillScreen(bkg);
+  _gfx->setTextColor(_color = UIColor::primary_txt);
+  _gfx->setTextSize(1 * DISPLAY_SCALE_X);
+  _gfx->cp437(true);
 }
 
 void ST7789LCDDisplay::setTextSize(int sz) {
-  display.setTextSize(sz * DISPLAY_SCALE_X);
+  if (_gfx) _gfx->setTextSize(sz * DISPLAY_SCALE_X);
 }
 
 void ST7789LCDDisplay::setColor(ColorVal c) {
-  display.setTextColor(_color = c);
+  if (_gfx) _gfx->setTextColor(_color = c);
 }
 
 void ST7789LCDDisplay::setCursor(int x, int y) {
-  display.setCursor(x * DISPLAY_SCALE_X, y * DISPLAY_SCALE_Y);
+  if (_gfx) _gfx->setCursor(x * DISPLAY_SCALE_X, y * DISPLAY_SCALE_Y);
 }
 
 void ST7789LCDDisplay::print(const char* str) {
-  display.print(str);
+  if (_gfx) _gfx->print(str);
 }
 
 void ST7789LCDDisplay::fillRect(int x, int y, int w, int h) {
-  display.fillRect(x * DISPLAY_SCALE_X, y * DISPLAY_SCALE_Y, w * DISPLAY_SCALE_X, h * DISPLAY_SCALE_Y, _color);
+  if (_gfx) {
+    _gfx->fillRect(x * DISPLAY_SCALE_X, y * DISPLAY_SCALE_Y,
+                   w * DISPLAY_SCALE_X, h * DISPLAY_SCALE_Y, _color);
+  }
 }
 
 void ST7789LCDDisplay::drawRect(int x, int y, int w, int h) {
-  display.drawRect(x * DISPLAY_SCALE_X, y * DISPLAY_SCALE_Y, w * DISPLAY_SCALE_X, h * DISPLAY_SCALE_Y, _color);
+  if (_gfx) {
+    _gfx->drawRect(x * DISPLAY_SCALE_X, y * DISPLAY_SCALE_Y,
+                   w * DISPLAY_SCALE_X, h * DISPLAY_SCALE_Y, _color);
+  }
 }
 
 void ST7789LCDDisplay::drawXbm(int x, int y, const uint8_t* bits, int w, int h) {
+  if (!_gfx) return;
   uint8_t byteWidth = (w + 7) / 8;
 
   for (int j = 0; j < h; j++) {
@@ -147,7 +239,8 @@ void ST7789LCDDisplay::drawXbm(int x, int y, const uint8_t* bits, int w, int h) 
       if (pixelOn) {
         for (int dy = 0; dy < DISPLAY_SCALE_X; dy++) {
           for (int dx = 0; dx < DISPLAY_SCALE_X; dx++) {
-            display.drawPixel(x * DISPLAY_SCALE_X + i * DISPLAY_SCALE_X + dx, y * DISPLAY_SCALE_Y + j * DISPLAY_SCALE_X + dy, _color);
+            _gfx->drawPixel(x * DISPLAY_SCALE_X + i * DISPLAY_SCALE_X + dx,
+                            y * DISPLAY_SCALE_Y + j * DISPLAY_SCALE_X + dy, _color);
           }
         }
       }
@@ -156,13 +249,15 @@ void ST7789LCDDisplay::drawXbm(int x, int y, const uint8_t* bits, int w, int h) 
 }
 
 uint16_t ST7789LCDDisplay::getTextWidth(const char* str) {
+  if (!_gfx) return 0;
   int16_t x1, y1;
   uint16_t w, h;
-  display.getTextBounds(str, 0, 0, &x1, &y1, &w, &h);
-
+  _gfx->getTextBounds(str, 0, 0, &x1, &y1, &w, &h);
   return w / DISPLAY_SCALE_X;
 }
 
 void ST7789LCDDisplay::endFrame() {
-  // display.display();
+  if (_isOn && _gfx) {
+    _gfx->blitTo(display);
+  }
 }
