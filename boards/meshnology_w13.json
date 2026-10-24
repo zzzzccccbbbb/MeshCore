@@ -13,7 +13,7 @@
     ],
     "usb_product": "Meshnology W13",
     "mcu": "nrf52840",
-    "variant": "meshnology_w13",
+    "variant": "meshnology_w13_nrf52840",
     "variants_dir": "variants",
     "bsp": {
       "name": "adafruit"

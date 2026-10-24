@@ -912,8 +912,15 @@ void MyMesh::begin(bool has_display) {
   }
 
 // if name is provided as a build flag, use that as default node name instead
+// Skip MAC placeholders (@@MAC / @@MAC4 / @@MAC6) — resolved later by BLE init.
 #ifdef ADVERT_NAME
-  strcpy(_prefs.node_name, ADVERT_NAME);
+  if (strncmp(ADVERT_NAME, "@@", 2) != 0) {
+    strcpy(_prefs.node_name, ADVERT_NAME);
+  } else {
+    char pub_key_hex[10];
+    mesh::Utils::toHex(pub_key_hex, self_id.pub_key, 4);
+    strcpy(_prefs.node_name, pub_key_hex);
+  }
 #else
   // use hex of first 4 bytes of identity public key as default node name
   char pub_key_hex[10];

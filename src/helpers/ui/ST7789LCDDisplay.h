@@ -25,6 +25,14 @@ public:
   {
     _isOn = false;
   }
+#elif defined(MESHNOLOGY_W13)
+  /* Dedicated SPI1 bus (PIN_SPI1_*), same FPC as factory ST7789 240x240. */
+  ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64),
+      display(&SPI1, PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST),
+      _peripher_power(peripher_power)
+  {
+    _isOn = false;
+  }
 #elif defined(LILYGO_TDECK) || defined(HELTEC_LORA_V4_TFT) || defined(HELTEC_V4_R8_TFT)
   ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64),
       displaySPI(HSPI),

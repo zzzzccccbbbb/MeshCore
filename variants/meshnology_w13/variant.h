@@ -47,7 +47,7 @@
 /* ---- Buzzer (PIN_BUZZER set per firmware env) ---- */
 #define PIN_BUZZER_HW           (32)  /* P1.00 */
 
-/* ---- I2C: SHT41 / BMP388 / OLED (SH1106) ---- */
+/* ---- I2C: SHT41 / BMP388 (LCD is ST7789 on SPI1) ---- */
 #define WIRE_INTERFACES_COUNT   (1)
 #define PIN_WIRE_SDA            (6)   /* P0.06 */
 #define PIN_WIRE_SCL            (5)   /* P0.05 */
@@ -93,7 +93,9 @@
 #define EXTERNAL_FLASH_DEVICES  P25Q16H
 #define EXTERNAL_FLASH_USE_QSPI
 
-/* ---- E-Ink GDEY0213B74 on SPI1 (MOSI-only; dummy MISO) ---- */
+/* ---- Display FPC on SPI1 (MOSI-only; dummy MISO) ----
+ * LCD SKU: ST7789 240x240. E-ink SKU: GDEY0213B74.
+ */
 #define PIN_DISPLAY_CS          (19)  /* P0.19 */
 #define PIN_DISPLAY_BUSY        (17)  /* P0.17 */
 #define PIN_DISPLAY_DC          (16)  /* P0.16 */
@@ -102,6 +104,16 @@
 #define PIN_SPI1_MISO           (2)   /* P0.02 header AIN0, not on FPC */
 #define PIN_SPI1_MOSI           (15)  /* P0.15 */
 #define PIN_SPI1_SCK            (13)  /* P0.13 */
+
+/* ST7789LCDDisplay / Adafruit_ST7789 aliases */
+#define PIN_TFT_CS              PIN_DISPLAY_CS
+#define PIN_TFT_DC              PIN_DISPLAY_DC
+#define PIN_TFT_RST             PIN_DISPLAY_RST
+#define PIN_TFT_SDA             PIN_SPI1_MOSI
+#define PIN_TFT_SCL             PIN_SPI1_SCK
+#ifndef PIN_TFT_LEDA_CTL
+#define PIN_TFT_LEDA_CTL        (-1)  /* backlight hardwired on W13 */
+#endif
 
 /* GxEPD2 expects these globals on some boards */
 extern const int MISO;

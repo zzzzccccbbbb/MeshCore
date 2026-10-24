@@ -12,7 +12,7 @@
   #if defined(MESHNOLOGY_W13_EINK)
     #include <helpers/ui/GxEPDDisplay.h>
   #else
-    #include <helpers/ui/SH1106Display.h>
+    #include <helpers/ui/ST7789LCDDisplay.h>
   #endif
   #include <helpers/ui/MomentaryButton.h>
 #endif

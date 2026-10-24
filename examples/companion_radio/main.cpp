@@ -195,7 +195,9 @@ void setup() {
     // Keep OLED/App default name in sync with BLE (Meshnology-XXXX), unless user renamed
     {
       NodePrefs *prefs = the_mesh.getNodePrefs();
-      bool sync = (strcmp(prefs->node_name, "@@MAC4") == 0 || strcmp(prefs->node_name, "@@MAC") == 0);
+      bool sync = (strcmp(prefs->node_name, "@@MAC4") == 0 ||
+                   strcmp(prefs->node_name, "@@MAC") == 0 ||
+                   strcmp(prefs->node_name, "@@MAC6") == 0);
 #ifdef ADVERT_NAME
       sync = sync || (strcmp(prefs->node_name, ADVERT_NAME) == 0);
 #endif

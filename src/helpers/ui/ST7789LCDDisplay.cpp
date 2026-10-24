@@ -16,8 +16,17 @@
   #define DISPLAY_SCALE_Y 3.75f // 240 / 64
 #endif
 
-#define DISPLAY_WIDTH 240
-#define DISPLAY_HEIGHT 320
+#ifndef DISPLAY_WIDTH
+  #define DISPLAY_WIDTH 240
+#endif
+
+#ifndef DISPLAY_HEIGHT
+  #define DISPLAY_HEIGHT 320
+#endif
+
+#ifndef PIN_TFT_LEDA_CTL
+  #define PIN_TFT_LEDA_CTL (-1)
+#endif
 
 bool ST7789LCDDisplay::i2c_probe(TwoWire& wire, uint8_t addr) {
   return true;
@@ -46,12 +55,19 @@ bool ST7789LCDDisplay::begin() {
     // Im not sure if this is just a t-deck problem or not, if your display is slow try this.
     #if defined(LILYGO_TDECK) || defined(HELTEC_LORA_V4_TFT) || defined(HELTEC_V4_R8_TFT)
       displaySPI.begin(PIN_TFT_SCL, PIN_TFT_MISO, PIN_TFT_SDA, PIN_TFT_CS);
+    #elif defined(MESHNOLOGY_W13)
+      SPI1.begin();
     #endif
 
     display.init(DISPLAY_WIDTH, DISPLAY_HEIGHT);
     display.setRotation(DISPLAY_ROTATION);
 
     display.setSPISpeed(40e6);
+
+#if defined(MESHNOLOGY_W13)
+    /* Factory 1.54" modules need inversion (matches factory INVON). */
+    display.invertDisplay(true);
+#endif
 
     display.fillScreen(ST77XX_BLACK);
     display.setTextColor(ST77XX_WHITE);
