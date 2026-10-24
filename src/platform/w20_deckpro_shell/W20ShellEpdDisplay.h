@@ -10,11 +10,18 @@
 #include <CRC32.h>
 #include <math.h>
 
+/* 128×128 逻辑坐标 → 物理墨水屏。默认等比缩放（与 X 同），靠上显示。 */
 #ifndef EINK_SCALE_X
 #define EINK_SCALE_X 1.875f
 #endif
 #ifndef EINK_SCALE_Y
-#define EINK_SCALE_Y 2.5f
+#define EINK_SCALE_Y 1.875f
+#endif
+#ifndef EINK_X_OFFSET
+#define EINK_X_OFFSET 0
+#endif
+#ifndef EINK_Y_OFFSET
+#define EINK_Y_OFFSET 0
 #endif
 
 /**
@@ -34,6 +41,11 @@ class W20ShellEpdDisplay : public DisplayDriver {
   int _cursor_y = 0;
   const float scale_x = EINK_SCALE_X;
   const float scale_y = EINK_SCALE_Y;
+  const float offset_x = EINK_X_OFFSET;
+  const float offset_y = EINK_Y_OFFSET;
+
+  int mapX(int x) const { return (int)(x * scale_x + offset_x); }
+  int mapY(int y) const { return (int)(y * scale_y + offset_y); }
 
 public:
   W20ShellEpdDisplay() : DisplayDriver(128, 128) {}

@@ -21,6 +21,7 @@ LV_IMG_DECLARE(img_A7682E)
 LV_IMG_DECLARE(img_PCM5102)
 LV_IMG_DECLARE(img_ebook)
 LV_IMG_DECLARE(img_touch)
+LV_IMG_DECLARE(img_meshcore)
 LV_IMG_DECLARE(img_start)
 
 

@@ -252,7 +252,7 @@ static struct menu_btn menu_btn_list[] =
     {SCREEN2_ID,  &img_setting, "Setting",  95,     13},
     {SCREEN3_ID,  &img_GPS,     "GPS",      167,    13},
     {SCREEN4_ID,  &img_wifi,    "Wifi",     23,     101},
-    {SCREEN7_ID,  &img_touch,   "Mesh",     95,     101},
+    {SCREEN7_ID,  &img_meshcore,"Meshcore", 95,     101},
     {SCREEN6_ID,  &img_batt,    "Battery",  167,    101},
     {SCREEN5_ID,  &img_test,    "Test",     23,     189},
     {SCREEN11_ID, &img_ebook,   "eBook",    95,     189},

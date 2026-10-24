@@ -118,8 +118,8 @@ void W20ShellEpdDisplay::setCursor(int x, int y)
   if (!_canvas) return;
   _crc.update<int>(x);
   _crc.update<int>(y);
-  _cursor_x = (int)(x * scale_x);
-  _cursor_y = (int)(y * scale_y);
+  _cursor_x = mapX(x);
+  _cursor_y = mapY(y);
   _canvas->setCursor(_cursor_x, _cursor_y);
 }
 
@@ -141,8 +141,8 @@ void W20ShellEpdDisplay::fillRect(int x, int y, int w, int h)
   _crc.update<int>(y);
   _crc.update<int>(w);
   _crc.update<int>(h);
-  const int px = (int)(x * scale_x);
-  const int py = (int)(y * scale_y);
+  const int px = mapX(x);
+  const int py = mapY(y);
   const int pw = (int)(w * scale_x);
   const int ph = (int)(h * scale_y);
   _canvas->fillRect(px, py, pw, ph, _curr_color);
@@ -155,8 +155,8 @@ void W20ShellEpdDisplay::drawRect(int x, int y, int w, int h)
   _crc.update<int>(y);
   _crc.update<int>(w);
   _crc.update<int>(h);
-  const int px = (int)(x * scale_x);
-  const int py = (int)(y * scale_y);
+  const int px = mapX(x);
+  const int py = mapY(y);
   const int pw = (int)(w * scale_x);
   const int ph = (int)(h * scale_y);
   _canvas->drawRect(px, py, pw, ph, _curr_color);
@@ -169,17 +169,21 @@ void W20ShellEpdDisplay::drawXbm(int x, int y, const uint8_t *bits, int w, int h
   _crc.update<int>(y);
   _crc.update<int>(w);
   _crc.update<int>(h);
-  const uint16_t startX = (uint16_t)(x * scale_x);
-  const uint16_t startY = (uint16_t)(y * scale_y);
+  const int startX = mapX(x);
+  const int startY = mapY(y);
   const uint16_t widthInBytes = (w + 7) / 8;
   for (uint16_t by = 0; by < h; by++) {
     int y1 = startY + (int)(by * scale_y);
     int y2 = startY + (int)((by + 1) * scale_y);
     int block_h = y2 - y1;
+    if (block_h < 1)
+      block_h = 1;
     for (uint16_t bx = 0; bx < w; bx++) {
       int x1 = startX + (int)(bx * scale_x);
       int x2 = startX + (int)((bx + 1) * scale_x);
       int block_w = x2 - x1;
+      if (block_w < 1)
+        block_w = 1;
       uint16_t byteOffset = (by * widthInBytes) + (bx / 8);
       uint8_t bitMask = 0x80 >> (bx & 7);
       if (bits[byteOffset] & bitMask) {
