@@ -194,27 +194,43 @@ class HomeScreen : public UIScreen {
 #endif
 
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
-    /* 简洁电池条：与返回键顶缘同级下移，避免贴顶裁切；竖格填充更接近主菜单观感 */
-    const int iconWidth = 18;
-    const int iconHeight = 10;
-    const int iconX = display.width() - iconWidth - 4;
+    /* 与主菜单 taskbar 同源：montserrat_14 电池档位 + CHARGE/OK（见 ui_battery_lv_symbol） */
+    const int batW = 18;
+    const int batH = 9;
+    const int iconX = display.width() - batW - 4;
     const int iconY = 3;
+    const bool finish = ui_battery_charge_complete();
+    const uint8_t* batBits;
+    if (finish || batteryPercentage >= 100)
+      batBits = mc_bat_full;
+    else if (batteryPercentage < 10)
+      batBits = mc_bat_empty;
+    else if (batteryPercentage < 30)
+      batBits = mc_bat_1;
+    else if (batteryPercentage < 50)
+      batBits = mc_bat_2;
+    else
+      batBits = mc_bat_3; /* 50–99：与主菜单同，无 4 格符号 */
+
     display.setColor(UIColor::title_txt);
-    display.drawRect(iconX, iconY, iconWidth - 2, iconHeight);
-    display.fillRect(iconX + iconWidth - 2, iconY + 2, 2, iconHeight - 4); /* 正极帽 */
-    const int innerW = iconWidth - 6;
-    const int fillW = (batteryPercentage * innerW) / 100;
-    if (fillW > 0) {
-      display.fillRect(iconX + 2, iconY + 2, fillW, iconHeight - 4);
-    }
+    display.drawXbm(iconX, iconY, batBits, batW, batH);
+
+    int leftOfBat = iconX;
     if (charging) {
-      display.fillRect(iconX - 5, iconY + 4, 3, 2);
-      display.fillRect(iconX - 4, iconY + 2, 1, 6);
+      if (finish) {
+        const int okW = 14, okH = 10;
+        leftOfBat = iconX - okW - 2;
+        display.drawXbm(leftOfBat, iconY, mc_icon_ok, okW, okH);
+      } else {
+        const int chgW = 10, chgH = 14;
+        leftOfBat = iconX - chgW - 2;
+        display.drawXbm(leftOfBat, 1, mc_icon_charge, chgW, chgH);
+      }
     }
 #ifdef PIN_BUZZER
     if (_task->isBuzzerQuiet()) {
       display.setColor(UIColor::warning_txt);
-      display.drawXbm(iconX - (charging ? 16 : 10), iconY + 1, muted_icon, 8, 8);
+      display.drawXbm(leftOfBat - 10, iconY + 1, muted_icon, 8, 8);
     }
 #endif
 #else

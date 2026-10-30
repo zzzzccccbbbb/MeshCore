@@ -169,9 +169,11 @@ void W20ShellEpdDisplay::drawXbm(int x, int y, const uint8_t *bits, int w, int h
   _crc.update<int>(y);
   _crc.update<int>(w);
   _crc.update<int>(h);
+  /* 必须纳入位图内容：同位置换图标（蓝牙 on/off、电量档）否则 CRC 不变会跳过墨水刷新 */
+  const uint16_t widthInBytes = (w + 7) / 8;
+  _crc.update<uint8_t>(bits, (size_t)widthInBytes * (size_t)h);
   const int startX = mapX(x);
   const int startY = mapY(y);
-  const uint16_t widthInBytes = (w + 7) / 8;
   for (uint16_t by = 0; by < h; by++) {
     int y1 = startY + (int)(by * scale_y);
     int y2 = startY + (int)((by + 1) * scale_y);
