@@ -586,10 +586,11 @@ void ui_wifi_menu_session_end(bool sta_connected_with_ip)
     w20_wifi_resume_meshtastic_reconnect(sta_connected_with_ip);
 #if defined(BLE_PIN_CODE)
     extern class SerialBLEInterface bluetooth_interface;
-    if (!bluetooth_interface.isEnabled()) {
-        bluetooth_interface.enable();
-        W20_WIFI_LOGLN("[W20UI] MeshCore BLE re-enabled after WiFi menu");
-    }
+    /* 必须先开 modem sleep，再 init BLE；否则 IDF abort（WiFi+BT 同开禁 PS_NONE） */
+    w20_wifi_apply_ps_coex_safe();
+    bluetooth_interface.restoreController();
+    w20_wifi_apply_ps_coex_safe(); /* restore 后再确认 MIN_MODEM */
+    W20_WIFI_LOGLN("[W20UI] MeshCore BLE controller restored after WiFi menu");
 #endif
     W20_WIFI_LOGLN("[W20UI] WiFi menu session end");
 }
@@ -647,7 +648,9 @@ void ui_wifi_prepare_for_ota(void)
         W20_WIFI_LOGLN("[WiFiPrepOTA] tearing leftover SoftAP");
         ui_wifi_force_ap_teardown(ui_wifi_is_connected());
     }
-    /* 配网收尾：释放 scan/门户/空闲任务堆，保证 OTA HTTP 能起来 */
+    /* 配网收尾：释放 scan/门户/空闲任务堆；连做两次，给 String/任务退出腾时间 */
+    ui_wifi_provisioning_reclaim_heap();
+    delay(80);
     ui_wifi_provisioning_reclaim_heap();
     W20_WIFI_LOG("[WiFiPrepOTA] done sta=%d ip=%s heap=%u\n", ui_wifi_sta_has_valid_ip() ? 1 : 0,
                   WiFi.localIP().toString().c_str(), (unsigned)ESP.getFreeHeap());
@@ -1590,6 +1593,12 @@ void ui_input_ip5356_key_poll(void)
                 s_ip5356_periodic_reprobe_ms = now;
             else if ((uint32_t)(now - s_ip5356_periodic_reprobe_ms) >= W20_IP5356_REPROBE_PERIODIC_MS) {
                 s_ip5356_periodic_reprobe_ms = now;
+#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
+                /* OTA 开服/上传勿 I2C 慢探；上传中 shell 本就不会进这里 */
+                if (w20_wifi_ota_is_running() || w20_wifi_ota_is_busy()) {
+                    return;
+                }
+#endif
                 ui_ip5356_runtime_reprobe_from_key("key_high_periodic");
             }
         } else if (w20_ip5356_is_present()) {

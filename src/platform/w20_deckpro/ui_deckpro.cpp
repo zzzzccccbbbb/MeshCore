@@ -762,12 +762,12 @@ static void lora_test_timer_event(lv_timer_t *t)
             }
             lv_label_set_text_fmt(lora_lab_buf[lora_cnt], "TX: %s", s);
             lora_cnt++;
-            /* 墨水屏全刷 ~1.3s：每行都刷会卡死发包节奏，约 3s 刷一次 */
+            /* 局刷较快：仍限频约 1s，避免刷屏拖死发包 */
             static uint32_t s_last_tx_epd_ms = 0;
             uint32_t now = millis();
-            if (lora_cnt == 1 || (now - s_last_tx_epd_ms) >= 3000) {
+            if (lora_cnt == 1 || (now - s_last_tx_epd_ms) >= 1000) {
                 s_last_tx_epd_ms = now;
-                ui_disp_full_refr();
+                /* label dirty → PART */
             }
         }
     } else if (lora_ui_test_mode == LORA_MODE_RECV) {
@@ -787,13 +787,13 @@ static void lora_test_timer_event(lv_timer_t *t)
             }
             lv_label_set_text_fmt(lora_lab_buf[lora_cnt], "RX: %s", recv_info);
             lora_cnt++;
-            ui_disp_full_refr();
+            /* RX 行更新：PART */
         }
     } else if (!lora_cw_ui_shown) {
         lora_cw_ui_shown = true;
         lv_label_set_text_fmt(lora_lab_buf[0], "CW ON @%.2fM %ddBm", (double)ui_lora_get_freq(),
                               LORA_TX_POWER_DBM);
-        ui_disp_full_refr();
+        /* CW 状态文案：PART */
     }
 }
 
@@ -1001,13 +1001,9 @@ static bool setting_rgb_sync_charging(bool refresh)
         ui_setting_handle *h = &setting_handle_list[i];
         if (h->type == UI_SETTING_TYPE_RGB && h->st != NULL) {
             lv_label_set_text(h->st, setting_rgb_mode_text(charging ? 3 : ui_setting_get_rgb_mode()));
-            if (refresh && state_changed
-#if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
-                && !ui_deckpro_epd_nav_hold_active()
-#endif
-            ) {
-                ui_disp_full_refr();
-            }
+            /* 同页文案变更：LVGL dirty → PART，不强制 FULL */
+            (void)refresh;
+            (void)state_changed;
             break;
         }
     }
@@ -1064,11 +1060,10 @@ void ui_deckpro_setting_defer_refresh(void)
         return;
     }
     ui_deckpro_setting_refresh_labels();
-    /* 进页 hold 期间 prepare 会刷一次，勿叠第二次 FULL */
+    /* 进页 hold 期间 prepare 会刷一次，勿叠第二次；同页标签更新走 PART */
     if (ui_deckpro_epd_nav_hold_active()) {
         return;
     }
-    ui_disp_full_refr();
 }
 #endif
 
@@ -1089,11 +1084,14 @@ static void setting_scr_event(lv_event_t *e)
 
     if(e->code == LV_EVENT_CLICKED) {
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
-        /* 开关/RGB 处理含短 delay 或全刷：抑制松手二次 CLICKED */
+        /* 开关/RGB：刷墨忙时加长防抖，避免连点叠刷拖死 EPD */
         if (h->type == UI_SETTING_TYPE_SW || h->type == UI_SETTING_TYPE_RGB) {
             const uint32_t now = millis();
-            if (now - s_setting_click_guard_ms < 450) {
-                W20_SETTING_LOG("setting click debounce idx=%d type=%d", (int)(h - setting_handle_list), (int)h->type);
+            const uint32_t guard_ms = ui_deckpro_epd_flush_busy() ? 900u : 450u;
+            if (now - s_setting_click_guard_ms < guard_ms) {
+                W20_SETTING_LOG("setting click debounce idx=%d type=%d busy=%d",
+                                (int)(h - setting_handle_list), (int)h->type,
+                                ui_deckpro_epd_flush_busy() ? 1 : 0);
                 return;
             }
             s_setting_click_guard_ms = now;
@@ -1106,12 +1104,10 @@ static void setting_scr_event(lv_event_t *e)
             h->set_cb(!h->get_cb());
             W20_SETTING_LOG("setting SW after-set get=%d list=%p st=%p", h->get_cb() ? 1 : 0, (void*)setting_list, (void*)h->st);
 #if defined(W20_MESHNOLOGY) && defined(USE_W20_DECKPRO_SHELL)
-            /* 即使 setting_list=NULL(scr_mgr_inactive 后 widget 仍可能存活),
-             * 同步刷 label 文本并立即刷墨，避免「点了没反应、退出再进才变」。 */
+            /* 同步改 label；刷忙时 shell 侧只 defer PART，不连环 FULL */
             if (h->st != nullptr) {
                 lv_label_set_text_fmt(h->st, "%s", h->get_cb() ? "ON" : "OFF");
             }
-            ui_disp_full_refr();
 #else
             lv_label_set_text_fmt(h->st, "%s", (h->get_cb() ? "ON" : "OFF"));
             ui_disp_full_refr();
@@ -1132,7 +1128,6 @@ static void setting_scr_event(lv_event_t *e)
             if (h->st != nullptr) {
                 lv_label_set_text(h->st, setting_rgb_mode_text(ui_battery_charging() ? 3 : h->get_mode_cb()));
             }
-            ui_disp_full_refr();
 #else
             lv_label_set_text(h->st, setting_rgb_mode_text(h->get_mode_cb()));
             ui_disp_full_refr();
@@ -1454,9 +1449,9 @@ static void GPS_loop_timer_event(lv_timer_t * t)
             s_gps_deck_pending = false;
             W20_GPS_LOGLN("[GPS-UI] handoff OK -> ui_gps_task_resume, timer 5s");
             ui_gps_task_resume();
-            /* 进页 prepare 已刷过 NoFix 布局；仅真实数据变化才再 FULL，避免连刷两帧 */
+            /* 进页 prepare 已 FULL；同页数据变化走 PART */
             if (scr3_GPS_updata() && !ui_deckpro_epd_flush_busy()) {
-                ui_disp_full_refr();
+                /* label 已改 → LVGL dirty → PART */
             }
             lv_timer_set_period(t, 5000);
             return;
@@ -1469,10 +1464,8 @@ static void GPS_loop_timer_event(lv_timer_t * t)
         return;
     }
 #endif
-    /* 5s 轮询：无参数变化不刷墨 */
-    if (scr3_GPS_updata()) {
-        ui_disp_full_refr();
-    }
+    /* 5s 轮询：有变化则依赖 label invalidate → PART */
+    (void)scr3_GPS_updata();
 }
 
 static void scr3_btn_event_cb(lv_event_t * e)
@@ -2032,7 +2025,7 @@ static void wifi_cfg_disconnect_btn_cb(lv_event_t *e)
         ui_wifi_force_drop_sta_for_softap();
         W20_WIFI_LOGLN("[WiFiCfg] portal already up → keep SoftAP (no restart)");
         wifi_cfg_update_status();
-        ui_disp_full_refr();
+        /* 同页文案：label dirty → PART */
         return;
     }
 
@@ -2042,7 +2035,7 @@ static void wifi_cfg_disconnect_btn_cb(lv_event_t *e)
     W20_WIFI_LOGLN("[WiFiCfg] Disconnect → SoftAP re-provision (join other WiFi)");
     ui_wifi_provisioning_start(true);
     wifi_cfg_update_status();
-    ui_disp_full_refr(); /* SoftAP 指引；随后尽快停墨，避免 SPI 拖死门户 HTTP */
+    /* SoftAP 指引：PART；随后尽快停墨，避免 SPI 拖死门户 HTTP */
     wifi_cfg_arm_epd_pause_soon();
 }
 
@@ -2322,7 +2315,7 @@ static void wifi_scan_timer_event(lv_timer_t *t)
         } else {
             show_wifi_scan();
         }
-        ui_disp_full_refr();
+        /* 扫描结果：同页列表文案 → PART */
         /* 下次周期性再扫 */
         if (t) {
             lv_timer_set_period(t, 10000);
@@ -2344,7 +2337,7 @@ static void wifi_scan_timer_event(lv_timer_t *t)
         }
     } else {
         lv_label_set_text(wifi_scan_lab, "Scan unavailable\n(OTA/AP active?)");
-        ui_disp_full_refr();
+        /* 不可用提示：PART */
         if (t) {
             lv_timer_set_period(t, 10000);
         }
@@ -2421,26 +2414,60 @@ static lv_obj_t *wifi_ota_hint_lab = NULL;
 static lv_obj_t *wifi_ota_url_lab = NULL;
 static lv_obj_t *wifi_ota_status_lab = NULL;
 static lv_obj_t *wifi_ota_prog_lab = NULL;
+/** 预擦弹层：大字号 + 粗边框，盖住正文直到 Server ready */
+static lv_obj_t *wifi_ota_erase_overlay = NULL;
 static lv_timer_t *wifi_ota_timer = NULL;
-static char wifi_ota_hint_cache[64] = {0};
+static char wifi_ota_hint_cache[80] = {0};
 static char wifi_ota_url_cache[72] = {0};
 static char wifi_ota_status_cache[96] = {0};
-static char wifi_ota_prog_cache[24] = {0};
+static char wifi_ota_prog_cache[28] = {0};
 static lv_timer_t *wifi_ota_deferred_timer = NULL;
 static TaskHandle_t s_wifi_ota_start_task = nullptr;
 static volatile bool s_wifi_ota_start_cancel = false;
+static uint8_t s_wifi_ota_paint_waits = 0;
 
-static void wifi_ota_request_full_refresh(void)
+static void wifi_ota_set_erase_overlay_visible(bool show)
 {
-    /* 监听/上传全程停墨：再 FULL 会锁触控、抢堆，浏览器也难连上 */
-    if (w20_wifi_ota_is_running() || w20_wifi_ota_is_busy()) {
+    if (!wifi_ota_erase_overlay) {
+        return;
+    }
+    if (show) {
+        lv_obj_clear_flag(wifi_ota_erase_overlay, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(wifi_ota_erase_overlay);
+        /* 弹层已有大字提示，隐藏与弹层重复的第 3/4 行 */
+        if (wifi_ota_status_lab) {
+            lv_obj_add_flag(wifi_ota_status_lab, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (wifi_ota_prog_lab) {
+            lv_obj_add_flag(wifi_ota_prog_lab, LV_OBJ_FLAG_HIDDEN);
+        }
+    } else {
+        lv_obj_add_flag(wifi_ota_erase_overlay, LV_OBJ_FLAG_HIDDEN);
+        if (wifi_ota_status_lab) {
+            lv_obj_clear_flag(wifi_ota_status_lab, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (wifi_ota_prog_lab) {
+            lv_obj_clear_flag(wifi_ota_prog_lab, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+/** 同页 OTA 文案更新。擦写中不上墨；仅 epd_paint_allowed（擦完就绪）或未开服时刷。 */
+static void wifi_ota_request_epd_refresh(void)
+{
+    if (w20_wifi_ota_is_busy()) {
+        return;
+    }
+    if (w20_wifi_ota_is_running() && !w20_wifi_ota_epd_paint_allowed()) {
+        return;
+    }
+    if (factory_epd_flush_suppressed() && !w20_wifi_ota_epd_paint_allowed()) {
         return;
     }
     lv_obj_t *scr = lv_scr_act();
     if (scr != nullptr) {
         lv_obj_invalidate(scr);
     }
-    ui_disp_full_refr();
 }
 
 static bool wifi_ota_set_label_if_changed(lv_obj_t *lab, char *cache, size_t cache_len, const char *text)
@@ -2457,66 +2484,111 @@ static bool wifi_ota_set_label_if_changed(lv_obj_t *lab, char *cache, size_t cac
     return true;
 }
 
+/** 进页首帧：擦除弹层 + 正文预填（开服前上墨）。 */
+static void wifi_ota_apply_erase_wait_labels(void)
+{
+    char hint[80];
+    char url[72];
+    char ssid[24] = {0};
+    ui_wifi_provisioning_ensure_ap_ssid();
+    ui_wifi_provisioning_get_ap_ssid(ssid, sizeof(ssid));
+    const bool hasSta = ui_wifi_sta_has_valid_ip();
+    if (hasSta) {
+        snprintf(hint, sizeof(hint), "LAN OTA after erase:");
+        w20_wifi_ota_get_url(url, sizeof(url));
+    } else {
+        snprintf(hint, sizeof(hint), "WiFi: %s", ssid[0] ? ssid : "Mesh-......");
+        snprintf(url, sizeof(url), "http://192.168.4.1:8080/ota");
+    }
+    wifi_ota_set_label_if_changed(wifi_ota_hint_lab, wifi_ota_hint_cache, sizeof(wifi_ota_hint_cache), hint);
+    wifi_ota_set_label_if_changed(wifi_ota_url_lab, wifi_ota_url_cache, sizeof(wifi_ota_url_cache), url);
+    /* 第 3/4 行与弹层重复，弹层显示时隐藏，擦完再填 Server ready / Progress */
+    wifi_ota_status_cache[0] = '\0';
+    wifi_ota_prog_cache[0] = '\0';
+    if (wifi_ota_status_lab) {
+        lv_label_set_text(wifi_ota_status_lab, "");
+    }
+    if (wifi_ota_prog_lab) {
+        lv_label_set_text(wifi_ota_prog_lab, "");
+    }
+    wifi_ota_set_erase_overlay_visible(true);
+}
+
 static bool wifi_ota_refresh_ui(void)
 {
     bool changed = false;
-    char hint[64];
-    char ip[24] = {0};
-    const bool hasIp = ui_wifi_sta_has_valid_ip();
-    if (hasIp) {
-        ui_wifi_get_ip(ip, sizeof(ip));
-        snprintf(hint, sizeof(hint), "Same WiFi as PC, open URL:");
-    } else if (ui_wifi_user_hold_offline()) {
-        snprintf(hint, sizeof(hint), "Disconnected. Rejoin in WIFI Config");
+    char hint[80];
+    const bool running = w20_wifi_ota_is_running();
+    const bool apOta = w20_wifi_ota_is_ap_mode();
+    const bool hasSta = ui_wifi_sta_has_valid_ip();
+    const int erasePct = w20_wifi_ota_get_erase_pct();
+    const bool erasing = erasePct >= 0;
+    const bool sessionReady = running && !erasing &&
+                              (strcmp(w20_wifi_ota_get_status_text(), "Server ready") == 0 ||
+                               w20_wifi_ota_epd_paint_allowed());
+    char ssid[24] = {0};
+    ui_wifi_provisioning_ensure_ap_ssid();
+    ui_wifi_provisioning_get_ap_ssid(ssid, sizeof(ssid));
+
+    /* 预擦中：保持弹层，不把串口百分比刷到屏 */
+    if (erasing && !w20_wifi_ota_epd_paint_allowed()) {
+        wifi_ota_set_erase_overlay_visible(true);
+        return false;
+    }
+
+    /* 擦完就绪：收起弹层，露出 SoftAP/URL */
+    if (sessionReady || (running && !erasing && strcmp(w20_wifi_ota_get_status_text(), "Server ready") == 0)) {
+        wifi_ota_set_erase_overlay_visible(false);
+    }
+
+    if (apOta || (!hasSta && !running)) {
+        snprintf(hint, sizeof(hint), "WiFi: %s", ssid[0] ? ssid : "Mesh-......");
+    } else if (running) {
+        snprintf(hint, sizeof(hint), "Same WiFi as PC, open:");
     } else {
-        snprintf(hint, sizeof(hint), "No WiFi. Use WIFI Config");
+        snprintf(hint, sizeof(hint), "LAN OTA URL:");
     }
     changed |= wifi_ota_set_label_if_changed(wifi_ota_hint_lab, wifi_ota_hint_cache, sizeof(wifi_ota_hint_cache), hint);
 
     char url[72] = {0};
-    if (hasIp) {
-        /* 有 IP 就显示完整 Web 地址；监听是否就绪看 Status 行 */
-        w20_wifi_ota_get_url(url, sizeof(url));
-    } else if (ui_wifi_user_hold_offline()) {
-        snprintf(url, sizeof(url), "Go WIFI Config, pick WiFi");
-    } else if (s_wifi_ota_start_task != nullptr) {
-        snprintf(url, sizeof(url), "Linking WiFi...");
-    } else {
-        const char *st = w20_wifi_ota_get_status_text();
-        if (st && (strcmp(st, "Need WiFi first") == 0 || strcmp(st, "Close WIFI Config") == 0 ||
-                   strcmp(st, "Cancelled") == 0 || strcmp(st, "Connecting WiFi...") == 0 ||
-                   strcmp(st, "Use WIFI Config") == 0)) {
-            snprintf(url, sizeof(url), "%s", st);
+    {
+        const char *stEarly = w20_wifi_ota_get_status_text();
+        if (stEarly && strcmp(stEarly, "Low memory, retry") == 0) {
+            snprintf(url, sizeof(url), "Exit WiFi, retry later");
+        } else if (stEarly && strcmp(stEarly, "Close WIFI Config") == 0) {
+            snprintf(url, sizeof(url), "%s", stEarly);
+        } else if (running || apOta) {
+            w20_wifi_ota_get_url(url, sizeof(url));
+        } else if (hasSta) {
+            w20_wifi_ota_get_url(url, sizeof(url));
         } else {
-            snprintf(url, sizeof(url), "Go WIFI Config, link router");
+            snprintf(url, sizeof(url), "http://192.168.4.1:8080/ota");
         }
     }
     changed |= wifi_ota_set_label_if_changed(wifi_ota_url_lab, wifi_ota_url_cache, sizeof(wifi_ota_url_cache), url);
 
     char statusLine[96] = {0};
-    if (w20_wifi_ota_is_running() && hasIp) {
+    if (running || sessionReady) {
         snprintf(statusLine, sizeof(statusLine), "%s", w20_wifi_ota_get_status_text());
-    } else if (s_wifi_ota_start_task != nullptr) {
-        snprintf(statusLine, sizeof(statusLine), hasIp ? "Starting OTA server..." : "Connecting saved WiFi...");
-    } else if (!hasIp) {
-        snprintf(statusLine, sizeof(statusLine), "OTA needs WiFi first");
     } else {
         const char *st = w20_wifi_ota_get_status_text();
         if (st && st[0] && strcmp(st, "Idle") != 0 && strcmp(st, "Stopped") != 0) {
             snprintf(statusLine, sizeof(statusLine), "%s", st);
         } else {
-            snprintf(statusLine, sizeof(statusLine), "OTA server starting...");
+            snprintf(statusLine, sizeof(statusLine), "Erasing flash (~20s)");
         }
     }
     changed |= wifi_ota_set_label_if_changed(wifi_ota_status_lab, wifi_ota_status_cache, sizeof(wifi_ota_status_cache),
                                              statusLine);
 
-    char prog[24] = {0};
+    char prog[28] = {0};
     const int pct = w20_wifi_ota_get_progress_pct();
     if (pct >= 0) {
         snprintf(prog, sizeof(prog), "Progress: %d%%", pct);
-    } else {
+    } else if (sessionReady || (running && !erasing)) {
         snprintf(prog, sizeof(prog), "Progress: --");
+    } else {
+        snprintf(prog, sizeof(prog), "Please wait, no touch");
     }
     changed |= wifi_ota_set_label_if_changed(wifi_ota_prog_lab, wifi_ota_prog_cache, sizeof(wifi_ota_prog_cache), prog);
     return changed;
@@ -2527,17 +2599,23 @@ static void wifi_ota_timer_cb(lv_timer_t *timer)
     (void)timer;
     const bool busy = w20_wifi_ota_is_busy();
     const bool running = w20_wifi_ota_is_running();
-    /* 文案有变才考虑刷墨；监听/上传中只改 RAM，不上墨 */
-    if (wifi_ota_refresh_ui()) {
-        if (!running && !busy) {
-            wifi_ota_request_full_refresh();
-        }
+    const bool paintOk = w20_wifi_ota_epd_paint_allowed();
+    const bool changed = wifi_ota_refresh_ui();
+    /* 仅擦完就绪窗口上墨；擦写中保持弹层 */
+    if (paintOk) {
+        wifi_ota_set_erase_overlay_visible(false);
+        (void)changed;
+        wifi_ota_request_epd_refresh();
+        w20_wifi_ota_ui_guide_painted();
+    } else if (changed && !running && !busy) {
+        wifi_ota_request_epd_refresh();
     }
     if (wifi_ota_timer) {
         if (busy) {
             lv_timer_set_period(wifi_ota_timer, 2000);
-        } else if (running) {
-            lv_timer_set_period(wifi_ota_timer, 15000);
+        } else if (paintOk || running) {
+            /* running 时短周期，才能赶上擦完 ~1.5s 的 paint_allowed 窗口 */
+            lv_timer_set_period(wifi_ota_timer, 300);
         } else {
             lv_timer_set_period(wifi_ota_timer, 3000);
         }
@@ -2553,23 +2631,20 @@ static void wifi_ota_start_done_async(void *user_data)
     }
     (void)wifi_ota_refresh_ui();
     if (w20_wifi_ota_is_running()) {
-        /* 只刷一次 URL/Server ready，然后继续停墨直到离开 OTA 页 */
-        factory_resume_flush_timer();
-        lv_obj_t *scr = lv_scr_act();
-        if (scr != nullptr) {
-            lv_obj_invalidate(scr);
+        /* 进页已刷过擦除提示；擦写中停墨。擦完 paint_allowed 时由 timer 刷就绪页 */
+        if (w20_wifi_ota_epd_paint_allowed()) {
+            factory_resume_flush_timer();
+            wifi_ota_request_epd_refresh();
+            w20_wifi_ota_ui_guide_painted();
         }
-        ui_disp_full_refr();
-        w20_deckpro_epd_drain();
-        factory_pause_flush_timer();
         if (wifi_ota_timer) {
-            lv_timer_set_period(wifi_ota_timer, 15000);
+            lv_timer_set_period(wifi_ota_timer, 300);
             lv_timer_reset(wifi_ota_timer);
             lv_timer_resume(wifi_ota_timer);
         }
     } else {
         factory_resume_flush_timer();
-        wifi_ota_request_full_refresh();
+        wifi_ota_request_epd_refresh();
         if (wifi_ota_timer) {
             lv_timer_set_period(wifi_ota_timer, 800);
             lv_timer_reset(wifi_ota_timer);
@@ -2583,7 +2658,7 @@ static void wifi_ota_start_task(void *param)
 {
     (void)param;
     W20_WIFI_LOGLN("[W20WifiOta] start task running");
-    w20_deckpro_epd_drain();
+    /* 勿 epd_drain：进页常有 gen-mismatch defer，drain 可空等满 10s */
     factory_pause_flush_timer();
     ui_wifi_prepare_for_ota();
     if (!s_wifi_ota_start_cancel) {
@@ -2604,7 +2679,6 @@ static void wifi_ota_start_task(void *param)
 static void wifi_ota_start_inline(void)
 {
     W20_WIFI_LOG("[W20WifiOta] inline start heap=%u\n", (unsigned)ESP.getFreeHeap());
-    w20_deckpro_epd_drain();
     factory_pause_flush_timer();
     ui_wifi_prepare_for_ota();
     if (!s_wifi_ota_start_cancel) {
@@ -2636,39 +2710,29 @@ static void wifi_ota_deferred_start_cb(lv_timer_t *timer)
         return;
     }
 
-    s_wifi_ota_start_cancel = false;
-    /* 配网后堆常 <12KB；8192 栈必败。降栈重试，仍败则 inline，禁止死循环。 */
-    static const uint32_t kStacks[] = {6144, 4096, 3072};
-    static uint8_t s_createFailRounds = 0;
-    BaseType_t created = pdFAIL;
-    for (unsigned i = 0; i < sizeof(kStacks) / sizeof(kStacks[0]); i++) {
-        s_wifi_ota_start_task = nullptr;
-        created = xTaskCreate(wifi_ota_start_task, "wifiOtaSt", kStacks[i], nullptr, 1, &s_wifi_ota_start_task);
-        if (created == pdPASS) {
-            W20_WIFI_LOG("[W20WifiOta] wifiOtaSt ok stack=%u heap=%u\n", (unsigned)kStacks[i],
-                          (unsigned)ESP.getFreeHeap());
-            s_createFailRounds = 0;
-            wifi_ota_refresh_ui();
-            return;
-        }
-        s_wifi_ota_start_task = nullptr;
-        Serial.printf("[W20WifiOta] wifiOtaSt xTaskCreate fail stack=%u heap=%u\n", (unsigned)kStacks[i],
-                      (unsigned)ESP.getFreeHeap());
-        delay(10);
-    }
-
-    s_createFailRounds++;
-    if (s_createFailRounds >= 2) {
-        Serial.println("[W20WifiOta] wifiOtaSt create failed — inline fallback");
-        s_createFailRounds = 0;
-        wifi_ota_start_inline();
+    /*
+     * 等本页至少一帧像素上屏再开服。勿死等 busy：OTA 页 timer/label 会不断
+     * coalesce dirty，busy 可永远不落（日志 wait #1..#24）。
+     */
+    if (!ui_deckpro_epd_pixels_ready() && s_wifi_ota_paint_waits < 16) {
+        s_wifi_ota_paint_waits++;
+        factory_resume_flush_timer();
+        W20_WIFI_LOG("[W20WifiOta] wait EPD paint #%u\n", (unsigned)s_wifi_ota_paint_waits);
+        wifi_ota_deferred_timer = lv_timer_create(wifi_ota_deferred_start_cb, 120, NULL);
+        lv_timer_set_repeat_count(wifi_ota_deferred_timer, 1);
         return;
     }
+    if (!ui_deckpro_epd_pixels_ready()) {
+        W20_WIFI_LOGLN("[W20WifiOta] EPD pixels not ready after wait — start anyway");
+    } else {
+        W20_WIFI_LOG("[W20WifiOta] EPD pixels ready after #%u waits\n", (unsigned)s_wifi_ota_paint_waits);
+    }
+    s_wifi_ota_paint_waits = 0;
+    s_wifi_ota_start_cancel = false;
 
-    Serial.println("[W20WifiOta] wifiOtaSt create failed — retry once then inline");
-    wifi_ota_refresh_ui();
-    wifi_ota_deferred_timer = lv_timer_create(wifi_ota_deferred_start_cb, 600, NULL);
-    lv_timer_set_repeat_count(wifi_ota_deferred_timer, 1);
+    /* SoftAP OTA 不依赖路由器；直接 inline */
+    W20_WIFI_LOG("[W20WifiOta] inline SoftAP start heap=%u\n", (unsigned)ESP.getFreeHeap());
+    wifi_ota_start_inline();
 }
 
 static void scr4_3_btn_event_cb(lv_event_t *e)
@@ -2700,39 +2764,77 @@ static void create4_3(lv_obj_t *parent)
     lv_obj_set_width(wifi_ota_hint_lab, lv_pct(100));
     lv_obj_set_style_text_font(wifi_ota_hint_lab, FONT_BOLD_MONO_SIZE_14, LV_PART_MAIN);
     lv_label_set_long_mode(wifi_ota_hint_lab, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(wifi_ota_hint_lab, "No WiFi. Use WIFI Config");
+    lv_label_set_text(wifi_ota_hint_lab, "WiFi OTA");
 
     wifi_ota_url_lab = lv_label_create(cont);
     lv_obj_set_width(wifi_ota_url_lab, lv_pct(100));
     lv_obj_set_style_text_font(wifi_ota_url_lab, FONT_BOLD_MONO_SIZE_14, LV_PART_MAIN);
     /* 超宽自动换行，避免裁切或画出显示区 */
     lv_label_set_long_mode(wifi_ota_url_lab, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(wifi_ota_url_lab, "Go WIFI Config, link router");
+    lv_label_set_text(wifi_ota_url_lab, "http://192.168.4.1:8080/ota");
 
     wifi_ota_status_lab = lv_label_create(cont);
     lv_obj_set_width(wifi_ota_status_lab, lv_pct(100));
-    lv_obj_set_style_text_font(wifi_ota_status_lab, FONT_BOLD_MONO_SIZE_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(wifi_ota_status_lab, FONT_BOLD_MONO_SIZE_16, LV_PART_MAIN);
     lv_label_set_long_mode(wifi_ota_status_lab, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(wifi_ota_status_lab, "OTA needs WiFi first");
+    lv_label_set_text(wifi_ota_status_lab, "");
+    lv_obj_add_flag(wifi_ota_status_lab, LV_OBJ_FLAG_HIDDEN);
 
     wifi_ota_prog_lab = lv_label_create(cont);
-    lv_obj_set_style_text_font(wifi_ota_prog_lab, FONT_BOLD_MONO_SIZE_14, LV_PART_MAIN);
-    lv_label_set_text(wifi_ota_prog_lab, "Progress: --");
+    lv_obj_set_style_text_font(wifi_ota_prog_lab, FONT_BOLD_MONO_SIZE_16, LV_PART_MAIN);
+    lv_label_set_text(wifi_ota_prog_lab, "");
+    lv_obj_add_flag(wifi_ota_prog_lab, LV_OBJ_FLAG_HIDDEN);
 
+    /*
+     * 小弹层偏中：上方留 WiFi/URL 两行；擦除文案只在弹层，不重复第 3/4 行。
+     */
+    wifi_ota_erase_overlay = lv_obj_create(parent);
+    lv_obj_set_size(wifi_ota_erase_overlay, 200, 88);
+    lv_obj_align(wifi_ota_erase_overlay, LV_ALIGN_CENTER, 0, 8);
+    lv_obj_clear_flag(wifi_ota_erase_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(wifi_ota_erase_overlay, 0, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(wifi_ota_erase_overlay, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(wifi_ota_erase_overlay, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_border_width(wifi_ota_erase_overlay, 3, LV_PART_MAIN);
+    lv_obj_set_style_border_color(wifi_ota_erase_overlay, DECKPRO_COLOR_FG, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(wifi_ota_erase_overlay, 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(wifi_ota_erase_overlay, 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_left(wifi_ota_erase_overlay, 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(wifi_ota_erase_overlay, 6, LV_PART_MAIN);
+    lv_obj_set_flex_flow(wifi_ota_erase_overlay, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(wifi_ota_erase_overlay, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(wifi_ota_erase_overlay, 4, LV_PART_MAIN);
+
+    lv_obj_t *erase_title = lv_label_create(wifi_ota_erase_overlay);
+    lv_obj_set_width(erase_title, lv_pct(100));
+    lv_obj_set_style_text_align(erase_title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_font(erase_title, &Font_Mono_Bold_20, LV_PART_MAIN);
+    lv_obj_set_style_text_color(erase_title, DECKPRO_COLOR_FG, LV_PART_MAIN);
+    lv_label_set_text(erase_title, "ERASING FLASH");
+
+    lv_obj_t *erase_sub = lv_label_create(wifi_ota_erase_overlay);
+    lv_obj_set_width(erase_sub, lv_pct(100));
+    lv_obj_set_style_text_align(erase_sub, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_font(erase_sub, FONT_BOLD_MONO_SIZE_16, LV_PART_MAIN);
+    lv_obj_set_style_text_color(erase_sub, DECKPRO_COLOR_FG, LV_PART_MAIN);
+    lv_label_set_text(erase_sub, "Do not touch (~20s)");
+
+    lv_obj_move_foreground(wifi_ota_erase_overlay);
     scr_back_btn_create(parent, "WiFi OTA", scr4_3_btn_event_cb);
 }
 
 static void entry4_3(void)
 {
     W20_WIFI_LOG("[W20UI] enter WiFi OTA page heap=%u\n", (unsigned)ESP.getFreeHeap());
-    /* 进页立刻停墨，给 xTaskCreate / HTTP 腾堆与 CPU */
-    factory_pause_flush_timer();
+    /* 先让本页 FULL 走完；开服时再 hard suppress。进页 pause 会导致首帧永远不上墨。 */
+    factory_resume_flush_timer();
     ui_wifi_provisioning_request_stop();
     memset(wifi_ota_hint_cache, 0, sizeof(wifi_ota_hint_cache));
     memset(wifi_ota_url_cache, 0, sizeof(wifi_ota_url_cache));
     memset(wifi_ota_status_cache, 0, sizeof(wifi_ota_status_cache));
     memset(wifi_ota_prog_cache, 0, sizeof(wifi_ota_prog_cache));
-    wifi_ota_refresh_ui();
+    /* 首帧即「擦除中」提示，开服前上墨；擦完再刷 Server ready */
+    wifi_ota_apply_erase_wait_labels();
     if (!wifi_ota_timer) {
         wifi_ota_timer = lv_timer_create(wifi_ota_timer_cb, 3000, NULL);
     } else {
@@ -2743,9 +2845,9 @@ static void entry4_3(void)
         lv_timer_del(wifi_ota_deferred_timer);
         wifi_ota_deferred_timer = NULL;
     }
-    /* 堆紧或刚离开 SoftAP：多等一会再启动，让 STA/堆稳定 */
-    const uint32_t heap = ESP.getFreeHeap();
-    const uint32_t defer_ms = (heap < 40000u) ? 2800u : 1800u;
+    s_wifi_ota_paint_waits = 0;
+    /* 先短等再轮询 EPD busy；FULL≈1.3s，由 deferred_start 等待上墨 */
+    const uint32_t defer_ms = ui_wifi_sta_has_valid_ip() ? 200u : 1200u;
     wifi_ota_deferred_timer = lv_timer_create(wifi_ota_deferred_start_cb, defer_ms, NULL);
     lv_timer_set_repeat_count(wifi_ota_deferred_timer, 1);
 }
@@ -2764,7 +2866,9 @@ static void exit4_3(void)
     while (s_wifi_ota_start_task != nullptr && (millis() - t0) < 2500) {
         delay(20);
     }
-    w20_wifi_ota_stop(); /* 内含 reclaim_heap */
+    w20_wifi_ota_stop(); /* 内含 reclaim_heap + 解除 EPD suppress */
+    s_wifi_ota_paint_waits = 0;
+    factory_set_epd_flush_suppressed(false);
     factory_resume_flush_timer();
     W20_WIFI_LOG("[W20UI] WiFi OTA exit heap=%u\n", (unsigned)ESP.getFreeHeap());
     if (wifi_ota_timer) {
@@ -2775,6 +2879,7 @@ static void exit4_3(void)
     wifi_ota_url_lab = NULL;
     wifi_ota_status_lab = NULL;
     wifi_ota_prog_lab = NULL;
+    wifi_ota_erase_overlay = NULL;
 }
 
 static void destroy4_3(void) {}
@@ -2889,9 +2994,8 @@ static bool test_refresh_status_labels(void)
 static void test_refresh_timer_event(lv_timer_t *t)
 {
     (void)t;
-    if (test_refresh_status_labels()) {
-        ui_disp_full_refr();
-    }
+    /* PASS/---- 变化：label dirty → PART，不强制 FULL */
+    (void)test_refresh_status_labels();
 }
 
 static void create5(lv_obj_t *parent) 
@@ -3068,16 +3172,11 @@ static bool scr6_battery_charge_epd_changed(void)
 static void scr6_batt_timer_event(lv_timer_t *t)
 {
     (void)t;
-    /* 每 5s 探测；Offline/数值不变则不刷墨 */
-    const bool changed = scr6_battery_update();
-    if (!changed) {
-        return;
-    }
-    /* 在途 FULL 时叠刷易乱屏（退出 Battery 时 gen mismatch / snapshot 撕裂） */
+    /* 每 5s 探测；数值变化靠 label dirty → PART；在途 flush 时跳过 */
     if (ui_deckpro_epd_flush_busy()) {
         return;
     }
-    ui_disp_full_refr();
+    (void)scr6_battery_update();
 }
 
 static void scr6_btn_event_cb(lv_event_t *e)
@@ -3921,12 +4020,11 @@ static void ebook_page_switch_cb(lv_event_t *e)
     if (opt == 'n') {
         if (ebook_curr_page + 1 < st->page_count) {
             ebook_show_page(ebook_curr_page + 1);
-            ui_disp_full_refr();
+            /* 翻页：PART；满局刷阈值由 shell 升 FULL */
         }
     } else if (opt == 'p') {
         if (ebook_curr_page > 0) {
             ebook_show_page(ebook_curr_page - 1);
-            ui_disp_full_refr();
         }
     }
 }
@@ -4920,11 +5018,11 @@ static void menu_taskbar_epd_sync(void)
     if (ui_deckpro_epd_nav_hold_active() || ui_deckpro_epd_flush_busy()) {
         return;
     }
+    /* 顶栏小更新走局刷：不调 ui_disp_full_refr，由 LVGL dirty → PART flush */
 #endif
-    ui_disp_full_refr();
 }
 
-/** 时钟+电量变更后异步 FULL 刷 EPD。
+/** 时钟+电量变更后异步刷 EPD（默认 PART；满局刷阈值由 shell 升 FULL）。
  * 勿在 RTC 首次有效时调 present_menu：会与 Deck 子菜单 pop/prepare 抢 gen，
  * 卡满 8s 超时后出现「LVGL 已回主菜单、墨水仍停在子页」。
  * present_menu 仅保留 Mesh→九宫格 / 开机路径。 */
@@ -5084,7 +5182,7 @@ extern "C" void ui_deckpro_on_power_status_changed(void)
         if (scr != nullptr) {
             lv_obj_invalidate(scr);
         }
-        ui_disp_full_refr();
+        /* Battery 同页状态：PART */
         return;
     }
 

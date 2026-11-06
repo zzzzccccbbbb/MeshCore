@@ -76,11 +76,12 @@ static bool s_staConnectOk = false;
 static uint8_t s_connectedStatusServed = 0;
 static char s_staConnectIp[16] = {0};
 static const char PROV_CONNECT_FAIL_MSG[] = "Connection failed. Retry!";
-static constexpr unsigned long kPortalHoldMinMs = 2000; /* 拿到 IP 后最短再留 SoftAP，供手机收 status */
-static constexpr unsigned long kPortalHoldAfterPollMs = 1500; /* 已轮询到 connected 后再留窗口再拆 */
-static constexpr unsigned long kPortalHoldMaxMs = 25000; /* 等手机轮询 connected；扫描曾踢掉手机时需更长 */
-static constexpr unsigned long kPortalHoldAbsMaxMs = 45000; /* 有客户端仍未轮询到时的硬上限 */
-static constexpr uint8_t kPortalHoldMinStatusPolls = 1;  /* 至少一次 status 返回 connected */
+static constexpr unsigned long kPortalHoldMinMs = 3500; /* 拿到 IP 后最短再留 SoftAP */
+static constexpr unsigned long kPortalHoldAfterPollMs = 4500; /* 手机收到 connected 后再留窗口（防 Waiting） */
+static constexpr unsigned long kPortalHoldMaxMs = 25000;
+static constexpr unsigned long kPortalHoldAbsMaxMs = 45000;
+/* 门户 JS 成功一次后即 stop poll；要 2 次会拖到 absMax=45s。一次 + AfterPoll 窗口即可 */
+static constexpr uint8_t kPortalHoldMinStatusPolls = 1;
 /** STA 卡在 DISCONNECTED+reason=0 时重试 WiFi.begin 的间隔与次数（不含首次）。 */
 static constexpr unsigned long kStaBeginRetryIntervalMs = 12000;
 static constexpr uint8_t kStaBeginMaxExtraRetries = 2;
@@ -888,12 +889,12 @@ void ui_wifi_pause_ble_for_radio(void)
     }
 #endif
 #if defined(BLE_PIN_CODE)
-    /* MeshCore companion Arduino BLE — stop advertising; PS_MIN_MODEM still required. */
+    /* 关 Bluedroid+controller（可再 init），WiFi 才能 WIFI_PS_NONE */
     extern class SerialBLEInterface bluetooth_interface;
-    if (bluetooth_interface.isEnabled()) {
-        W20_WIFI_LOGLN("[WiFiProv] Pause MeshCore BLE for WiFi radio");
-        bluetooth_interface.disable();
-        delay(50);
+    if (bluetooth_interface.isControllerUp()) {
+        W20_WIFI_LOGLN("[WiFiProv] Shutdown MeshCore BLE controller for WiFi radio");
+        bluetooth_interface.shutdownController();
+        delay(100);
     }
 #endif
 }

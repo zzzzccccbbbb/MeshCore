@@ -40,12 +40,30 @@ void w20_shell_prewarm_mesh_ui(void);
 #ifndef W20_DECKPRO_EPD_HOLD_IMAGE
 #define W20_DECKPRO_EPD_HOLD_IMAGE 1
 #endif
-void w20_deckpro_epd_after_refresh(void);
+/**
+ * 连续局刷次数达到该值后，下一次强制全刷（防残影）。0=不强制。
+ * platformio.ini 可 -D W20_EPD_PARTIAL_BEFORE_FULL=10 覆盖。
+ */
+#ifndef W20_EPD_PARTIAL_BEFORE_FULL
+#define W20_EPD_PARTIAL_BEFORE_FULL 8
+#endif
+/**
+ * 刷后收尾。was_full=true 时 powerOff/hibernate；
+ * 局刷勿关电，否则控制器 previous RAM 丢失 → 下一帧差分出白字/开关看起来没变。
+ */
+void w20_deckpro_epd_after_refresh(bool was_full = true);
 /** 与 Meshtastic forceDisplay / 异步刷墨任务互斥，调用方成对使用。 */
 void w20_deckpro_epd_lock(void);
 void w20_deckpro_epd_unlock(void);
 /** 关机/休眠前等待进行中的刷墨结束。 */
 void w20_deckpro_epd_drain(void);
+/**
+ * 决定本次是否全刷：want_full 或局刷计数已达 W20_EPD_PARTIAL_BEFORE_FULL。
+ * Mesh/Deck 共用；刷完后须 w20_deckpro_epd_commit_refresh。
+ */
+bool w20_deckpro_epd_resolve_full(bool want_full);
+/** 记录一次已完成的刷新，用于局刷计数（全刷清零）。 */
+void w20_deckpro_epd_commit_refresh(bool was_full);
 #endif
 
 void w20_deckpro_shell_init(void);

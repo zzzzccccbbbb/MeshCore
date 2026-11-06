@@ -220,9 +220,17 @@ void W20ShellEpdDisplay::endFrame()
   /*
    * 对齐 w20_meshtastic EInkDisplay2 W20 分支：
    *   drawPixel(x, (H-1)-y)  — 与 Deck disp_flush（FLIP_Y=0）同向
+   * 默认可局刷；进页 forceFull / 满 W20_EPD_PARTIAL_BEFORE_FULL 次走全刷。
    */
+  const bool want_full = _force_full;
+  _force_full = false;
+  const bool do_full = w20_deckpro_epd_resolve_full(want_full);
   _epd->setRotation(0);
-  _epd->setFullWindow();
+  if (do_full) {
+    _epd->setFullWindow();
+  } else {
+    _epd->setPartialWindow(0, 0, EINK_WIDTH, EINK_HEIGHT);
+  }
   _epd->firstPage();
   do {
     for (uint16_t y = 0; y < EINK_HEIGHT; y++) {
@@ -238,7 +246,8 @@ void W20ShellEpdDisplay::endFrame()
     }
   } while (_epd->nextPage());
 
-  w20_deckpro_epd_after_refresh();
+  w20_deckpro_epd_commit_refresh(do_full);
+  w20_deckpro_epd_after_refresh(do_full); /* 局刷保留 previous RAM */
   _last_crc = (int)crc;
   w20_deckpro_epd_unlock();
 }

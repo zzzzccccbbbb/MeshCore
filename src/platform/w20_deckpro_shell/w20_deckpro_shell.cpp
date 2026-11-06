@@ -92,11 +92,31 @@ static volatile bool s_epd_nav_gen_primed = false;
  * 当前 job 结束后用最新 decodebuffer 再刷一帧，避免 gen mismatch 连环 FULL。
  * dirty 仅在「worker 已接手 / 已在 coalesce」时置位；空闲 prepare 不得标 dirty，
  * 否则单次进页会固定「刷完 → one more」闪两次。
+ *
+ * 导航（prepare need_full）的 one-more 必须 FULL；同页小改可 PART。
  */
 static volatile bool s_epd_coalesce_active = false;
 static volatile bool s_epd_coalesce_dirty = false;
+/** prepare/导航触发的 coalesce：one-more 强制 FULL（非同页小改）。 */
+static volatile bool s_epd_coalesce_need_full = false;
 /** snapshot 已交给 worker（或 sync 刷在途）；用于区分「尚未提交」与「真在刷」。 */
 static volatile bool s_epd_job_submitted = false;
+/**
+ * worker 专用续刷令牌：主线程 prepare/render_start 会清 pending，不可用 pending 握手，
+ * 否则 one-more 窗口被清掉 → submitted 仍 true 却去睡 → 墨水永久 busy。
+ */
+static volatile bool s_epd_worker_one_more = false;
+/** Setting 同页开关：刷忙时只改 LVGL buffer，当前帧结束后补一次 PART（避免 FULL 风暴）。 */
+static volatile bool s_epd_setting_defer = false;
+/**
+ * 导航 gen mismatch：旧 job 结束后勿在 worker 内立刻 memcpy（新页可能未画完 → 半屏花屏）。
+ * 交主路径等「导航后那一帧」LVGL 画完再提交；该标志强制下次 FULL。
+ */
+static volatile bool s_epd_mismatch_need_full = false;
+/** mismatch 之后已见过对应导航帧的 render_start（或当时正在 render）。 */
+static volatile bool s_epd_mismatch_render_ok = false;
+/** dips_render_start_cb 写入：当前 flush_gen 是否已开过导航帧（供 mismatch 判断，避免死等）。 */
+static volatile uint32_t s_epd_last_render_gen = 0;
 /** 补发点击短窗：挡住 PRESSED 重绘启动 EPD（须在 dips_render_start_cb 之前可见）。 */
 static uint32_t s_touch_replay_epd_gate_ms = 0;
 int disp_refr_mode = DISP_REFR_MODE_PART;
@@ -135,7 +155,7 @@ static uint32_t s_epd_worker_job_gen = 0;
 #endif
 
 static void w20_deckpro_epd_flush_if_pending(void);
-static void w20_deckpro_epd_do_flush(const uint8_t *bitmap, lv_coord_t w, lv_coord_t h, bool full, uint32_t *elapsed_ms,
+static bool w20_deckpro_epd_do_flush(const uint8_t *bitmap, lv_coord_t w, lv_coord_t h, bool full, uint32_t *elapsed_ms,
                                     uint32_t job_gen);
 static void w20_deckpro_epd_async_init(void);
 
@@ -260,8 +280,12 @@ void w20_shell_mesh_epd_flush_once(void)
     }
 }
 
-void w20_deckpro_epd_after_refresh(void)
+void w20_deckpro_epd_after_refresh(bool was_full)
 {
+    /* 局刷必须保持 previous 在控制器里，供 hasFastPartialUpdate 差分；关电会隔帧白墨 */
+    if (!was_full) {
+        return;
+    }
 #if W20_DECKPRO_EPD_HOLD_IMAGE
     deck_epd.powerOff();
 #else
@@ -583,6 +607,8 @@ void w20_deckpro_sleep_prompt_flush(void)
     s_epd_flush_pending = false;
     s_epd_coalesce_active = false;
     s_epd_coalesce_dirty = false;
+    s_epd_mismatch_need_full = false;
+    s_epd_mismatch_render_ok = false;
     s_epd_job_submitted = false;
     s_epd_flush_done = true;
     w20_deckpro_epd_drain();
@@ -663,28 +689,57 @@ void w20_deckpro_sleep_prompt_flush(void)
                (unsigned long)elapsed);
 }
 
-static void w20_deckpro_epd_do_flush(const uint8_t *bitmap, lv_coord_t w, lv_coord_t h, bool full, uint32_t *elapsed_ms,
+/** 连续局刷计数；达 W20_EPD_PARTIAL_BEFORE_FULL 后强制全刷。 */
+static uint8_t s_epd_part_streak = 0;
+
+bool w20_deckpro_epd_resolve_full(bool want_full)
+{
+    if (want_full) {
+        return true;
+    }
+#if W20_EPD_PARTIAL_BEFORE_FULL > 0
+    if (s_epd_part_streak >= (uint8_t)W20_EPD_PARTIAL_BEFORE_FULL) {
+        return true;
+    }
+#endif
+    return false;
+}
+
+void w20_deckpro_epd_commit_refresh(bool was_full)
+{
+    if (was_full) {
+        s_epd_part_streak = 0;
+    } else if (s_epd_part_streak < 255) {
+        s_epd_part_streak++;
+    }
+}
+
+/** @return 实际是否全刷（含局刷计数升格） */
+static bool w20_deckpro_epd_do_flush(const uint8_t *bitmap, lv_coord_t w, lv_coord_t h, bool full, uint32_t *elapsed_ms,
                                     uint32_t job_gen)
 {
     const uint32_t t0 = millis();
-    if (full) {
+    const bool do_full = w20_deckpro_epd_resolve_full(full);
+    if (do_full) {
         deck_epd.setFullWindow();
     } else {
         deck_epd.setPartialWindow(0, 0, w, h);
     }
     deck_epd.firstPage();
-    const lv_coord_t draw_h = full ? h : (h - 3);
+    /* 勿再 h-3：局刷少画底行会导致 prev/new 与全屏差分不一致、隔帧白字 */
     do {
-        deck_epd.drawInvertedBitmap(0, 0, bitmap, w, draw_h, GxEPD_BLACK);
+        deck_epd.drawInvertedBitmap(0, 0, bitmap, w, h, GxEPD_BLACK);
     } while (deck_epd.nextPage());
-    /* 像素已上屏：先放行导航触控；随后 powerOff 可能再耗数百 ms。 */
+    w20_deckpro_epd_commit_refresh(do_full);
+    /* 像素已上屏：先放行导航触控；全刷后 powerOff 可能再耗数百 ms。 */
     if (job_gen == 0 || job_gen == s_epd_flush_gen) {
         w20_epd_mark_pixels_shown();
     }
-    w20_deckpro_epd_after_refresh();
+    w20_deckpro_epd_after_refresh(do_full);
     if (elapsed_ms != nullptr) {
         *elapsed_ms = millis() - t0;
     }
+    return do_full;
 }
 
 #if W20_EPD_ASYNC_FLUSH
@@ -698,55 +753,103 @@ static void epd_flush_worker_task(void *param)
             const uint32_t job_gen = s_epd_worker_job_gen;
             uint32_t elapsed = 0;
 
+            bool did_full = full;
             w20_deckpro_epd_lock();
             if (s_epd_flush_snapshot != nullptr) {
-                w20_deckpro_epd_do_flush(s_epd_flush_snapshot, LV_HOR_RES, LV_VER_RES, full, &elapsed, job_gen);
+                did_full = w20_deckpro_epd_do_flush(s_epd_flush_snapshot, LV_HOR_RES, LV_VER_RES, full, &elapsed, job_gen);
             }
             w20_deckpro_epd_unlock();
 
-            W20_UI_LOG("epd_flush %s %dx%d %lums epd_end=%s async=1", full ? "FULL" : "PART", (int)LV_HOR_RES,
+            W20_UI_LOG("epd_flush %s %dx%d %lums epd_end=%s async=1", did_full ? "FULL" : "PART", (int)LV_HOR_RES,
                        (int)LV_VER_RES, (unsigned long)elapsed,
+                       did_full ?
 #if W20_DECKPRO_EPD_HOLD_IMAGE
-                       "powerOff");
+                       "powerOff"
 #else
-                       "hibernate");
+                       "hibernate"
 #endif
+                       : "ramKeep");
 
-            if (disp_refr_mode != DISP_REFR_MODE_FULL) {
+            if (disp_refr_mode != DISP_REFR_MODE_FULL && !s_epd_mismatch_need_full) {
                 disp_refr_mode = DISP_REFR_MODE_PART;
             }
             if (flush_timer != nullptr) {
                 lv_timer_pause(flush_timer);
             }
             if (job_gen == s_epd_flush_gen) {
-                if (s_epd_coalesce_dirty) {
-                    /* 同 gen 期间 UI 又变了：只再刷一帧最新 buffer，勿连环 gen++ */
+                /* Setting 刷忙期间积下的开关改动：空闲后补一帧 PART */
+                if (s_epd_setting_defer && !s_epd_coalesce_dirty && !s_epd_flush_suppressed &&
+                    (!w20_wifi_ota_is_running() || w20_wifi_ota_epd_paint_allowed())) {
+                    s_epd_setting_defer = false;
+                    s_epd_coalesce_dirty = true;
+                }
+                if (s_epd_coalesce_dirty && !s_epd_flush_suppressed &&
+                    (!w20_wifi_ota_is_running() || w20_wifi_ota_epd_paint_allowed())) {
+                    /* 导航 need_full→FULL；同页小改→PART（勿全局 FULL，否则 Setting 连点风暴） */
                     s_epd_coalesce_dirty = false;
+                    const bool one_full = s_epd_coalesce_need_full || s_epd_mismatch_need_full;
+                    s_epd_coalesce_need_full = false;
+                    s_epd_worker_one_more = true; /* 主线程可清 pending，不能靠 pending 续刷 */
                     s_epd_flush_pending = true;
-                    W20_UI_LOG("epd_flush coalesce dirty -> one more (gen=%lu)",
-                               (unsigned long)s_epd_flush_gen);
+                    s_epd_job_full = one_full;
+                    disp_refr_mode = one_full ? DISP_REFR_MODE_FULL : DISP_REFR_MODE_PART;
+                    W20_UI_LOG("epd_flush coalesce dirty -> one more %s (gen=%lu)",
+                               one_full ? "FULL" : "PART", (unsigned long)s_epd_flush_gen);
                 } else {
+                    /* OTA/SoftAP 停墨中：勿再挂 pending，否则全程 epd_flush busy */
+                    s_epd_coalesce_dirty = false;
                     s_epd_coalesce_active = false;
+                    s_epd_coalesce_need_full = false;
+                    s_epd_worker_one_more = false;
+                    s_epd_setting_defer = false;
                     s_epd_job_submitted = false;
                     s_epd_flush_done = true;
                     w20_epd_mark_pixels_shown();
                 }
-            } else if (!s_epd_flush_pending) {
-                /* 旧 job 被 prepare gen++ 作废：再刷最新 buffer（LVGL 应已画完；见 flush_if_pending 忙时不叠交） */
-                W20_UI_LOG("epd_flush gen mismatch job=%lu cur=%lu -> retry", (unsigned long)job_gen,
-                           (unsigned long)s_epd_flush_gen);
-                /* retry 用最新 decodebuffer；清 dirty，避免再叠一帧 */
+            } else {
+                /*
+                 * 导航 gen++ 作废旧 job：勿在 worker 内立刻 memcpy+续刷。
+                 * 新页 render 可能刚开始（日志：mismatch 距 lv_render_start 仅数十 ms），
+                 * 半成品 buffer 会造成「上 1/3 新页、下 2/3 旧页」。
+                 * 交主路径：等导航帧 render 完成后再由 flush_timer 置 pending → FULL。
+                 * 即使此刻 !rendering，也勿 pending（可能尚在 prepare→render 空隙，buffer 仍是旧页）。
+                 */
+                W20_UI_LOG("epd_flush gen mismatch job=%lu cur=%lu -> defer FULL (wait LVGL)",
+                           (unsigned long)job_gen, (unsigned long)s_epd_flush_gen);
                 s_epd_coalesce_dirty = false;
-                s_epd_flush_pending = true;
-            }
-
-            if (!s_epd_flush_pending) {
+                s_epd_coalesce_active = false;
+                s_epd_coalesce_need_full = false; /* 已走 mismatch FULL，勿再叠 PART one-more */
+                s_epd_worker_one_more = false;
+                s_epd_setting_defer = false;
+                s_epd_job_submitted = false;
+                s_epd_flush_pending = false;
+                s_epd_mismatch_need_full = true;
+                disp_refr_mode = DISP_REFR_MODE_FULL;
+                lv_disp_t *disp = lv_disp_get_default();
+                /* 正在画 / 已画过当前 gen → 等本帧结束即可；否则等下一次 render_start */
+                s_epd_mismatch_render_ok =
+                    (disp != nullptr && disp->rendering_in_progress) ||
+                    (s_epd_last_render_gen == s_epd_flush_gen);
+                if (flush_timer != nullptr) {
+                    lv_timer_resume(flush_timer);
+                }
+                /* 保持 !flush_done：导航锁直到 defer 的 FULL 像素上屏 */
                 break;
             }
+
+            if (!s_epd_worker_one_more) {
+                /* 防死锁：绝不能带着 submitted=true 去睡 */
+                s_epd_job_submitted = false;
+                break;
+            }
+            s_epd_worker_one_more = false;
             s_epd_flush_pending = false;
-            /* 收尾/重试：强制 FULL，避免只 PART 半页 */
-            s_epd_job_full = true;
-            disp_refr_mode = DISP_REFR_MODE_FULL;
+            /* 启动前再认一次导航 FULL（prepare keep 可能紧跟决策） */
+            if (s_epd_coalesce_need_full || s_epd_mismatch_need_full) {
+                s_epd_job_full = true;
+                s_epd_coalesce_need_full = false;
+                disp_refr_mode = DISP_REFR_MODE_FULL;
+            }
             s_epd_worker_job_gen = s_epd_flush_gen;
             if (decodebuffer != nullptr && s_epd_flush_snapshot != nullptr && s_epd_flush_snapshot_bytes > 0) {
                 memcpy(s_epd_flush_snapshot, decodebuffer, s_epd_flush_snapshot_bytes);
@@ -778,8 +881,13 @@ static void w20_deckpro_epd_async_init(void)
 
 static void w20_deckpro_epd_flush_if_pending(void)
 {
-    /* 仅上传中禁刷；空闲监听时仍要能刷出 Server ready / URL */
+    /* OTA 开服/上传禁刷；擦完「Server ready」窗口靠 epd_paint_allowed 放行一帧 */
     if (w20_wifi_ota_is_busy()) {
+        s_epd_flush_pending = false;
+        return;
+    }
+    if (w20_wifi_ota_is_running() && !w20_wifi_ota_epd_paint_allowed()) {
+        s_epd_flush_pending = false;
         return;
     }
     if (s_epd_flush_suppressed) {
@@ -800,8 +908,19 @@ static void w20_deckpro_epd_flush_if_pending(void)
      * 只标 dirty，等当前 job 结束走 coalesce one-more / gen mismatch retry。
      */
     if (s_epd_job_submitted) {
+        /* Setting 同页：刷在途只 defer，勿标 dirty（否则连点又变 FULL 风暴） */
+        if (scr_mgr_top_id() == SCREEN2_ID && !s_epd_coalesce_need_full && !s_epd_mismatch_need_full &&
+            disp_refr_mode != DISP_REFR_MODE_FULL) {
+            s_epd_setting_defer = true;
+            s_epd_flush_pending = false;
+            return;
+        }
         s_epd_coalesce_active = true;
         s_epd_coalesce_dirty = true;
+        /* 刷在途又来 FULL 请求：多半是导航，one-more 用 FULL */
+        if (disp_refr_mode == DISP_REFR_MODE_FULL || s_epd_mismatch_need_full) {
+            s_epd_coalesce_need_full = true;
+        }
         s_epd_flush_pending = false;
         return;
     }
@@ -810,7 +929,11 @@ static void w20_deckpro_epd_flush_if_pending(void)
 
     lv_coord_t w = LV_HOR_RES;
     lv_coord_t h = LV_VER_RES;
-    const bool full = (disp_refr_mode == DISP_REFR_MODE_FULL);
+    const bool full = (disp_refr_mode == DISP_REFR_MODE_FULL) || s_epd_mismatch_need_full;
+    if (s_epd_mismatch_need_full) {
+        s_epd_mismatch_need_full = false;
+        s_epd_mismatch_render_ok = false;
+    }
     if (full) {
         disp_refr_mode = DISP_REFR_MODE_PART;
     }
@@ -821,27 +944,41 @@ static void w20_deckpro_epd_flush_if_pending(void)
         s_epd_job_submitted = true;
         w20_deckpro_epd_lock();
         uint32_t elapsed = 0;
-        w20_deckpro_epd_do_flush(decodebuffer, w, h, full, &elapsed, job_gen);
+        const bool did_full = w20_deckpro_epd_do_flush(decodebuffer, w, h, full, &elapsed, job_gen);
         w20_deckpro_epd_unlock();
-        W20_UI_LOG("epd_flush %s %dx%d %lums epd_end=%s async=0", full ? "FULL" : "PART", (int)w, (int)h,
-                   (unsigned long)elapsed,
+        W20_UI_LOG("epd_flush %s %dx%d %lums epd_end=%s async=0", did_full ? "FULL" : "PART", (int)w, (int)h,
+                   (unsigned long)elapsed, did_full ?
 #if W20_DECKPRO_EPD_HOLD_IMAGE
-                   "powerOff");
+                   "powerOff"
 #else
-                   "hibernate");
+                   "hibernate"
 #endif
+                   : "ramKeep");
         disp_refr_mode = DISP_REFR_MODE_PART;
         if (flush_timer != nullptr) {
             lv_timer_pause(flush_timer);
         }
         if (job_gen == s_epd_flush_gen) {
+            if (s_epd_setting_defer && !s_epd_coalesce_dirty) {
+                s_epd_setting_defer = false;
+                s_epd_coalesce_dirty = true;
+            }
             if (s_epd_coalesce_dirty) {
                 s_epd_coalesce_dirty = false;
                 s_epd_flush_pending = true;
-                W20_UI_LOG("epd_flush coalesce dirty -> one more (gen=%lu)",
-                           (unsigned long)s_epd_flush_gen);
+                if (s_epd_coalesce_need_full || s_epd_mismatch_need_full) {
+                    disp_refr_mode = DISP_REFR_MODE_FULL;
+                    s_epd_coalesce_need_full = false;
+                    W20_UI_LOG("epd_flush coalesce dirty -> one more FULL (gen=%lu)",
+                               (unsigned long)s_epd_flush_gen);
+                } else {
+                    W20_UI_LOG("epd_flush coalesce dirty -> one more PART (gen=%lu)",
+                               (unsigned long)s_epd_flush_gen);
+                }
             } else {
                 s_epd_coalesce_active = false;
+                s_epd_coalesce_need_full = false;
+                s_epd_setting_defer = false;
                 s_epd_job_submitted = false;
                 s_epd_flush_done = true;
                 w20_epd_mark_pixels_shown();
@@ -862,29 +999,43 @@ static void w20_deckpro_epd_flush_if_pending(void)
     s_epd_job_submitted = true;
     w20_deckpro_epd_lock();
     uint32_t elapsed = 0;
-    w20_deckpro_epd_do_flush(decodebuffer, w, h, full, &elapsed, job_gen);
+    const bool did_full = w20_deckpro_epd_do_flush(decodebuffer, w, h, full, &elapsed, job_gen);
     w20_deckpro_epd_unlock();
 
-    W20_UI_LOG("epd_flush %s %dx%d %lums epd_end=%s", full ? "FULL" : "PART", (int)w, (int)h,
-               (unsigned long)elapsed,
+    W20_UI_LOG("epd_flush %s %dx%d %lums epd_end=%s", did_full ? "FULL" : "PART", (int)w, (int)h,
+               (unsigned long)elapsed, did_full ?
 #if W20_DECKPRO_EPD_HOLD_IMAGE
-               "powerOff");
+               "powerOff"
 #else
-               "hibernate");
+               "hibernate"
 #endif
+               : "ramKeep");
 
     disp_refr_mode = DISP_REFR_MODE_PART;
     if (flush_timer != nullptr) {
         lv_timer_pause(flush_timer);
     }
     if (job_gen == s_epd_flush_gen) {
+        if (s_epd_setting_defer && !s_epd_coalesce_dirty) {
+            s_epd_setting_defer = false;
+            s_epd_coalesce_dirty = true;
+        }
         if (s_epd_coalesce_dirty) {
             s_epd_coalesce_dirty = false;
             s_epd_flush_pending = true;
-            W20_UI_LOG("epd_flush coalesce dirty -> one more (gen=%lu)",
-                       (unsigned long)s_epd_flush_gen);
+            if (s_epd_coalesce_need_full || s_epd_mismatch_need_full) {
+                disp_refr_mode = DISP_REFR_MODE_FULL;
+                s_epd_coalesce_need_full = false;
+                W20_UI_LOG("epd_flush coalesce dirty -> one more FULL (gen=%lu)",
+                           (unsigned long)s_epd_flush_gen);
+            } else {
+                W20_UI_LOG("epd_flush coalesce dirty -> one more PART (gen=%lu)",
+                           (unsigned long)s_epd_flush_gen);
+            }
         } else {
             s_epd_coalesce_active = false;
+            s_epd_coalesce_need_full = false;
+            s_epd_setting_defer = false;
             s_epd_job_submitted = false;
             s_epd_flush_done = true;
             w20_epd_mark_pixels_shown();
@@ -897,10 +1048,20 @@ static void flush_timer_cb(lv_timer_t *t)
 {
     (void)t;
     lv_disp_t *disp = lv_disp_get_default();
-    if (disp->rendering_in_progress == false) {
-        s_epd_flush_pending = true;
-        lv_timer_pause(flush_timer);
+    if (disp == nullptr || disp->rendering_in_progress) {
+        return; /* 保持运行，等本帧画完 */
     }
+    /* mismatch 后必须先见到导航帧 render，避免用旧页 buffer 提交 FULL */
+    if (s_epd_mismatch_need_full && !s_epd_mismatch_render_ok) {
+        /* 兜底：render 已在 mismatch 前完成时，worker 侧应用 last_render_gen；此处再认一次防竞态 */
+        if (s_epd_last_render_gen == s_epd_flush_gen) {
+            s_epd_mismatch_render_ok = true;
+        } else {
+            return;
+        }
+    }
+    s_epd_flush_pending = true;
+    lv_timer_pause(flush_timer);
 }
 
 static void dips_render_start_cb(lv_disp_drv_t *disp_drv)
@@ -944,11 +1105,24 @@ static void dips_render_start_cb(lv_disp_drv_t *disp_drv)
     if (s_epd_nav_gen_primed) {
         s_epd_nav_gen_primed = false;
     } else if (worker_busy) {
-        s_epd_coalesce_active = true;
-        s_epd_coalesce_dirty = true;
+        /*
+         * Setting 同页开关连点：只画 decodebuffer，不叠 dirty（否则 PART/FULL 风暴 + pending 竞态）。
+         * 导航 prepare 已置 need_full 时仍走正常 coalesce。
+         */
+        if (scr_mgr_top_id() == SCREEN2_ID && !s_epd_coalesce_need_full) {
+            s_epd_setting_defer = true;
+        } else {
+            s_epd_coalesce_active = true;
+            s_epd_coalesce_dirty = true;
+        }
         /* 不 gen++：当前 job 结束后用最新 buffer 再刷一帧 */
     } else {
         s_epd_flush_gen++;
+    }
+    /* 必须写入：Setting 快退时 render 常早于旧 PART 结束；否则 mismatch 永远等不到 render_ok */
+    s_epd_last_render_gen = s_epd_flush_gen;
+    if (s_epd_mismatch_need_full) {
+        s_epd_mismatch_render_ok = true;
     }
     static uint32_t s_render_seq = 0;
     s_render_seq++;
@@ -1318,6 +1492,11 @@ void factory_set_epd_flush_suppressed(bool suppressed)
         s_epd_flush_pending = false;
         s_epd_coalesce_active = false;
         s_epd_coalesce_dirty = false;
+        s_epd_coalesce_need_full = false;
+        s_epd_mismatch_need_full = false;
+        s_epd_mismatch_render_ok = false;
+        /* SoftAP/OTA 停墨：必须清 !flush_done，否则 KEY/OTA 全程假 busy、HTTP 极慢 */
+        s_epd_flush_done = true;
         /* SoftAP 等停墨期间不会再 flush，勿一直锁触摸 */
         s_epd_nav_touch_lock = false;
         if (flush_timer != nullptr) {
@@ -1370,17 +1549,26 @@ void ui_deckpro_epd_prepare_subscreen(void)
      * 空闲：gen++，不标 dirty（否则首帧刷完必再 one more）。
      * 忙：仅第一次 gen++ 作废在途旧页并 dirty；再导航只 dirty，避免连环 mismatch。
      */
+    s_epd_setting_defer = false; /* 导航优先，丢弃 Setting 同页延后 PART */
     if (!busy) {
         s_epd_flush_gen++;
         s_epd_coalesce_active = false;
         s_epd_coalesce_dirty = false;
+        s_epd_coalesce_need_full = false;
     } else if (!s_epd_coalesce_active) {
         s_epd_flush_gen++;
         s_epd_coalesce_active = true;
         s_epd_coalesce_dirty = true;
+        s_epd_coalesce_need_full = true; /* 子菜单进出：整页换图 */
+        disp_refr_mode = DISP_REFR_MODE_FULL;
+        /* 在途若已排 PART one-more，升为 FULL，避免快退半屏 */
+        s_epd_job_full = true;
         W20_UI_LOG("epd prepare coalesce begin gen=%lu", (unsigned long)s_epd_flush_gen);
     } else {
         s_epd_coalesce_dirty = true;
+        s_epd_coalesce_need_full = true;
+        disp_refr_mode = DISP_REFR_MODE_FULL;
+        s_epd_job_full = true;
         W20_UI_LOG("epd prepare coalesce keep gen=%lu", (unsigned long)s_epd_flush_gen);
     }
     s_epd_nav_gen_primed = true;
@@ -1523,6 +1711,14 @@ void w20_deckpro_shell_init(void)
 
 void w20_deckpro_shell_loop(void)
 {
+    /* 固件上传中：只跑 HTTP/OTA，跳过电池/KEY/LVGL/射频，显著减负 */
+    if (w20_wifi_ota_is_busy()) {
+        w20_wifi_ota_loop();
+        w20_wifi_ota_loop();
+        w20_wifi_ota_loop();
+        return; /* 无 delay：尽快回到 handleClient */
+    }
+
     /* 软睡中也要 poll：5min 已睡 → 继续计到 10min 真关机 */
     w20_auto_off_poll();
     if (!w20_deck_sleep_active()) {
@@ -1565,7 +1761,7 @@ void w20_deckpro_shell_loop(void)
     }
     ui_input_boot_ip5356_wake_poll();
     peri_lighting_led_key_poll();
-    delay((w20_wifi_ota_is_busy() || w20_wifi_ota_is_running()) ? 1 : 5);
+    delay(w20_wifi_ota_is_running() ? 1 : 5);
 }
 
 #else

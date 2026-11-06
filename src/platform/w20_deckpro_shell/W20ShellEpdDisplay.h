@@ -37,6 +37,7 @@ class W20ShellEpdDisplay : public DisplayDriver {
   uint16_t _curr_color = 1; /* canvas: 1=black */
   CRC32 _crc;
   int _last_crc = 0;
+  bool _force_full = false; /* forceFullRefresh / 进页：下次刷走 FULL */
   int _cursor_x = 0;
   int _cursor_y = 0;
   const float scale_x = EINK_SCALE_X;
@@ -54,7 +55,11 @@ public:
   void restoreDeckRotation();
   bool isOn() override { return _isOn; }
   bool isEink() override { return true; }
-  void forceFullRefresh() override { _last_crc = 0; }
+  void forceFullRefresh() override
+  {
+    _last_crc = 0;
+    _force_full = true;
+  }
   void turnOn() override;
   void turnOff() override;
   void clear() override;

@@ -15,10 +15,14 @@ class SerialBLEInterface : public BaseSerialInterface, BLESecurityCallbacks, BLE
   bool deviceConnected;
   bool oldDeviceConnected;
   bool _isEnabled;
+  bool _ble_inited;       /* begin() 成功且 controller 未 shutdown */
+  bool _restore_enabled;  /* shutdown 前是否在广播，restore 时要不要 enable */
   uint16_t last_conn_id;
   uint32_t _pin_code;
   unsigned long _last_write;
   unsigned long adv_restart_time;
+  char _ble_prefix[24];
+  char _ble_name[32];     /* begin 解析后的名字（不含 prefix） */
 
   struct Frame {
     uint8_t len;
@@ -59,8 +63,12 @@ public:
     oldDeviceConnected = false;
     adv_restart_time = 0;
     _isEnabled = false;
+    _ble_inited = false;
+    _restore_enabled = false;
     _last_write = 0;
     last_conn_id = 0;
+    _ble_prefix[0] = 0;
+    _ble_name[0] = 0;
     recv_queue = xQueueCreateStatic(
       FRAME_QUEUE_SIZE, sizeof(Frame), recv_queue_storage, &recv_queue_state
     );
@@ -74,6 +82,15 @@ public:
    * @param pin_code   the BLE security pin
    */
   void begin(const char* prefix, char* name, uint32_t pin_code);
+
+  /**
+   * WiFi/OTA：关掉 Bluedroid + BT controller（deinit false，可再 init）。
+   * 之后可用 WIFI_PS_NONE；结束后调用 restoreController().
+   */
+  void shutdownController();
+  /** 重新 begin +（若 shutdown 前在广播）enable。 */
+  void restoreController();
+  bool isControllerUp() const { return _ble_inited; }
 
   // BaseSerialInterface methods
   void enable() override;

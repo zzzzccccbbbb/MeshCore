@@ -67,6 +67,7 @@ MultiSerialInterface interface_manager;
 #if defined(USE_W20_DECKPRO_SHELL)
   #include "platform/w20_deckpro_shell/w20_deckpro_shell.h"
   #include "platform/w20_deckpro_shell/w20_meshcore_ui.h"
+  #include "platform/w20_deckpro/w20_wifi_ota.h"
 #endif
 
 StdRNG fast_rng;
@@ -237,6 +238,15 @@ void setup() {
 }
 
 void loop() {
+#if defined(USE_W20_DECKPRO_SHELL)
+  /* OTA 开服/上传：勿跑 mesh/BLE iface/sensors，把 CPU 让给 WiFi TCP + Flash */
+  if (w20_wifi_ota_is_running() || w20_wifi_ota_is_busy()) {
+    w20_deckpro_shell_loop();
+    rtc_clock.tick();
+    return;
+  }
+#endif
+
   the_mesh.loop();
   interface_manager.loop();
   sensors.loop();

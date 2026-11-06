@@ -24,8 +24,13 @@ void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code
             addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
     }
   }
+  strncpy(_ble_prefix, prefix ? prefix : "", sizeof(_ble_prefix) - 1);
+  _ble_prefix[sizeof(_ble_prefix) - 1] = 0;
+  strncpy(_ble_name, name ? name : "", sizeof(_ble_name) - 1);
+  _ble_name[sizeof(_ble_name) - 1] = 0;
+
   char dev_name[32+16];
-  sprintf(dev_name, "%s%s", prefix, name);
+  sprintf(dev_name, "%s%s", _ble_prefix, _ble_name);
 
   // Create the BLE Device
   BLEDevice::init(dev_name);
@@ -55,6 +60,59 @@ void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code
   pRxCharacteristic->setCallbacks(this);
 
   pServer->getAdvertising()->addServiceUUID(SERVICE_UUID);
+  _ble_inited = true;
+}
+
+void SerialBLEInterface::shutdownController() {
+  if (!_ble_inited) {
+    return;
+  }
+  _restore_enabled = _isEnabled || _restore_enabled;
+  BLE_DEBUG_PRINTLN("shutdownController() restore_enabled=%d", (int)_restore_enabled);
+
+  if (_isEnabled && pServer != NULL && pService != NULL) {
+    pServer->getAdvertising()->stop();
+    if (last_conn_id != 0) {
+      pServer->disconnect(last_conn_id);
+    }
+    pService->stop();
+    _isEnabled = false;
+  }
+  oldDeviceConnected = deviceConnected = false;
+  adv_restart_time = 0;
+  clearBuffers();
+
+  /* false：可再次 init。true 会 mem_release 且不清 initialized，无法恢复。 */
+  BLEDevice::deinit(false);
+  delay(80);
+
+  pServer = NULL;
+  pService = NULL;
+  pTxCharacteristic = NULL;
+  _ble_inited = false;
+}
+
+void SerialBLEInterface::restoreController() {
+  if (_ble_inited) {
+    if (_restore_enabled && !_isEnabled) {
+      enable();
+    }
+    _restore_enabled = false;
+    return;
+  }
+  if (_ble_name[0] == 0) {
+    BLE_DEBUG_PRINTLN("restoreController(): no saved name, skip");
+    return;
+  }
+  BLE_DEBUG_PRINTLN("restoreController() begin+enable=%d", (int)_restore_enabled);
+  char name_copy[32];
+  strncpy(name_copy, _ble_name, sizeof(name_copy) - 1);
+  name_copy[sizeof(name_copy) - 1] = 0;
+  begin(_ble_prefix, name_copy, _pin_code);
+  if (_restore_enabled) {
+    enable();
+  }
+  _restore_enabled = false;
 }
 
 // -------- BLESecurityCallbacks methods
@@ -141,6 +199,10 @@ void SerialBLEInterface::clearBuffers() {
 
 void SerialBLEInterface::enable() { 
   if (_isEnabled) return;
+  if (!_ble_inited || pServer == NULL || pService == NULL) {
+    BLE_DEBUG_PRINTLN("enable() skipped: controller down");
+    return;
+  }
 
   _isEnabled = true;
   clearBuffers();
@@ -162,6 +224,9 @@ void SerialBLEInterface::disable() {
 
   BLE_DEBUG_PRINTLN("SerialBLEInterface::disable");
 
+  if (!_ble_inited || pServer == NULL || pService == NULL) {
+    return;
+  }
   pServer->getAdvertising()->stop();
   pServer->disconnect(last_conn_id);
   pService->stop();
@@ -170,6 +235,9 @@ void SerialBLEInterface::disable() {
 }
 
 size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
+  if (!_ble_inited || pTxCharacteristic == NULL) {
+    return 0;
+  }
   if (len > MAX_FRAME_SIZE) {
     BLE_DEBUG_PRINTLN("writeFrame(), frame too big, len=%d", len);
     return 0;
@@ -197,6 +265,10 @@ bool SerialBLEInterface::isWriteBusy() const {
 }
 
 size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
+  if (!_ble_inited || pServer == NULL || pTxCharacteristic == NULL) {
+    return 0;
+  }
+
   if (send_queue_len > 0   // first, check send queue
     && millis() >= _last_write + BLE_WRITE_MIN_INTERVAL    // space the writes apart
   ) {

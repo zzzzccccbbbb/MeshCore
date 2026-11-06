@@ -103,12 +103,21 @@ pio run -e meshnology_w20_companion_radio_ble
 # 使用 BUILD/w20-firmware-ota.bin
 ```
 
-### 步骤
+### 步骤（两种路径，进页自动选）
 
-1. PC 与设备连**同一路由器 WiFi**（若走 SoftAP，则按屏上提示连设备热点）。
-2. 设备菜单：**Wifi → WiFi OTA**，屏上会显示地址，例如 `http://192.168.x.x:8080/ota`。
-3. 浏览器打开该地址，上传 **`w20-firmware-ota.bin`**（BUILD 目录内；文件名须含 **`w20`**）。
-4. **保持停在 WiFi OTA 页**直到提示成功并自动重启（离开页面会关掉 OTA 服务）。
+| 设备状态 | 行为 | 你怎么连 |
+|----------|------|----------|
+| **已连路由器**（有 LAN IP） | STA 局域网 OTA | 手机/PC 与设备同一 WiFi，打开屏上 `http://192.168.x.x:8080/ota` |
+| **未联网** | SoftAP OTA（通常更快） | 连屏上 **`Mesh-xxxxxx`** 热点，打开 `http://192.168.4.1:8080/ota` |
+
+1. 设备菜单：**Wifi → WiFi OTA**（有 STA 则保持联网；无 STA 则起 SoftAP）。
+2. 按屏上提示连网并打开 URL：
+   - SoftAP：屏显 **`WiFi: Mesh-xxxxxx`** + `http://192.168.4.1:8080/ota`
+   - 已联网：屏显局域网 `http://192.168.x.x:8080/ota`
+3. 上传 **`w20-firmware-ota.bin`**（BUILD 目录；文件名须含 **`w20`**）。
+4. **保持停在 WiFi OTA 页**直到成功并自动重启。
+
+进页偏中小弹层 **`ERASING FLASH` / `Do not touch (~20s)`**（上方保留 WiFi/URL；不重复 Status/Progress）；预擦期间墨水停刷。擦完自动收起弹层并刷 **`Server ready`** + SoftAP/LAN 升级 URL。此间请勿操作（返回可能要等当前擦块结束）。经路由器 STA 可能偏慢；要快可先 Disconnect 再用 SoftAP。
 
 ### 注意
 
@@ -119,14 +128,16 @@ pio run -e meshnology_w20_companion_radio_ble
 
 上传中触控可能较卡；网页中途断开会中止本次写 Flash（`Upload aborted`），一般可重新打开页面再传。要彻底退出 OTA，返回离开该页即可。
 
+进 WiFi/OTA 会 **shutdown BLE controller**（可再恢复）；离开 WiFi 菜单后 BLE 会重新 begin。
+
 ### 常见问题
 
 | 现象 | 处理 |
 |------|------|
-| 打不开 OTA 地址 | 确认停在 **WiFi OTA** 页；STA 用屏上 IP 的 **8080** 端口 |
+| SoftAP 打不开 | 手机须连 **Mesh-xxx**（不是家里 WiFi）；URL 带 **:8080** |
+| LAN 打不开 / 极慢 | 确认同网段；路由器 AP 隔离会挡；可 Disconnect 后走 SoftAP |
 | `Name need w20` | 文件名须包含 `w20` |
 | `Bad file header` | 须用 `w20-firmware-ota.bin`，不要传裸 `firmware.bin` |
-| ping 不通 | PC 与设备同网段，且未仍连着 `Mesh-xxxxxx` SoftAP（路由器 AP 隔离也会挡） |
 | 从旧分区布局升级 | 用当前分区表 **全片擦除 + 第二节全量烧录** 一次 |
 
 ---
