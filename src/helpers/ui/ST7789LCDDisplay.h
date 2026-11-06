@@ -25,6 +25,10 @@ public:
   void blitTo(Adafruit_ST7789 &panel);
 };
 
+#if defined(MESHNOLOGY_M19)
+class MeshnologyM19Board;
+#endif
+
 class ST7789LCDDisplay : public DisplayDriver {
   #if defined(LILYGO_TDECK) || defined(HELTEC_LORA_V4_TFT) || defined(HELTEC_V4_R8_TFT)
     SPIClass displaySPI;
@@ -35,6 +39,11 @@ class ST7789LCDDisplay : public DisplayDriver {
   bool _isOn;
   uint16_t _color;
   RefCountedDigitalPin* _peripher_power;
+#if defined(MESHNOLOGY_M19)
+  MeshnologyM19Board* _m19_board;
+  void lockSpi();
+  void unlockSpi();
+#endif
 
   bool i2c_probe(TwoWire& wire, uint8_t addr);
   bool ensureFrameBuffer();
@@ -46,6 +55,9 @@ public:
   {
     _isOn = false;
   }
+#elif defined(MESHNOLOGY_M19)
+  /* Shared HSPI with LoRa; panel RST via MCP23017 (PIN_TFT_RST=-1). */
+  ST7789LCDDisplay(MeshnologyM19Board* board);
 #elif defined(MESHNOLOGY_W13)
   /* Dedicated SPI1 bus (PIN_SPI1_*), same FPC as factory ST7789 240x240. */
   ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64),

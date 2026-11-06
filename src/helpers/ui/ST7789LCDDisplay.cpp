@@ -1,6 +1,9 @@
 #include "ST7789LCDDisplay.h"
 #include <stdlib.h>
 #include <string.h>
+#if defined(MESHNOLOGY_M19)
+  #include <MeshnologyM19Board.h>
+#endif
 
 #ifndef PIN_TFT_MISO
   #define PIN_TFT_MISO -1
@@ -101,6 +104,24 @@ bool ST7789LCDDisplay::i2c_probe(TwoWire& wire, uint8_t addr) {
   return true;
 }
 
+#if defined(MESHNOLOGY_M19)
+ST7789LCDDisplay::ST7789LCDDisplay(MeshnologyM19Board* board)
+  : DisplayDriver(128, 64),
+    display(&board->sharedSpi, PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST),
+    _fb(NULL), _gfx(NULL), _peripher_power(NULL), _m19_board(board)
+{
+  _isOn = false;
+}
+
+void ST7789LCDDisplay::lockSpi() {
+  if (_m19_board) _m19_board->lockSharedSpi();
+}
+
+void ST7789LCDDisplay::unlockSpi() {
+  if (_m19_board) _m19_board->unlockSharedSpi();
+}
+#endif
+
 // Color scheme
 ColorVal UIColor::window_bkg = ST77XX_WHITE;
 ColorVal UIColor::title_bkg = ST77XX_BLUE;
@@ -125,10 +146,18 @@ bool ST7789LCDDisplay::begin() {
   if (!_isOn) {
     if (_peripher_power) _peripher_power->claim();
 
+#if defined(MESHNOLOGY_M19)
+    if (_m19_board) _m19_board->lcdResetPulse();
+    if (PIN_TFT_LEDA_CTL != -1) {
+      pinMode(PIN_TFT_LEDA_CTL, OUTPUT);
+      digitalWrite(PIN_TFT_LEDA_CTL, LOW);
+    }
+#else
     if (PIN_TFT_LEDA_CTL != -1) {
       pinMode(PIN_TFT_LEDA_CTL, OUTPUT);
       digitalWrite(PIN_TFT_LEDA_CTL, HIGH);
     }
+#endif
 
     // Im not sure if this is just a t-deck problem or not, if your display is slow try this.
     #if defined(LILYGO_TDECK) || defined(HELTEC_LORA_V4_TFT) || defined(HELTEC_V4_R8_TFT)
@@ -137,17 +166,23 @@ bool ST7789LCDDisplay::begin() {
       SPI1.begin();
     #endif
 
+#if defined(MESHNOLOGY_M19)
+    lockSpi();
+#endif
     display.init(DISPLAY_WIDTH, DISPLAY_HEIGHT);
     display.setRotation(DISPLAY_ROTATION);
 
     display.setSPISpeed(40e6);
 
-#if defined(MESHNOLOGY_W13)
+#if defined(MESHNOLOGY_W13) || defined(MESHNOLOGY_M19)
     /* Factory 1.54" modules need inversion (matches factory INVON). */
     display.invertDisplay(true);
 #endif
 
     if (!ensureFrameBuffer()) {
+#if defined(MESHNOLOGY_M19)
+      unlockSpi();
+#endif
       return false;
     }
 
@@ -156,6 +191,12 @@ bool ST7789LCDDisplay::begin() {
     _gfx->setTextColor(ST77XX_WHITE);
     _gfx->setTextSize(2 * DISPLAY_SCALE_X);
     _gfx->cp437(true);
+#if defined(MESHNOLOGY_M19)
+    unlockSpi();
+    if (PIN_TFT_LEDA_CTL != -1) {
+      digitalWrite(PIN_TFT_LEDA_CTL, HIGH);
+    }
+#endif
 
     _isOn = true;
   }
@@ -169,9 +210,11 @@ void ST7789LCDDisplay::turnOn() {
 
 void ST7789LCDDisplay::turnOff() {
   if (_isOn) {
+#if !defined(MESHNOLOGY_M19)
     if (PIN_TFT_LEDA_CTL != -1) {
       digitalWrite(PIN_TFT_LEDA_CTL, HIGH);
     }
+#endif
     if (PIN_TFT_RST != -1) {
       digitalWrite(PIN_TFT_RST, LOW);
     }
@@ -258,6 +301,12 @@ uint16_t ST7789LCDDisplay::getTextWidth(const char* str) {
 
 void ST7789LCDDisplay::endFrame() {
   if (_isOn && _gfx) {
+#if defined(MESHNOLOGY_M19)
+    lockSpi();
     _gfx->blitTo(display);
+    unlockSpi();
+#else
+    _gfx->blitTo(display);
+#endif
   }
 }

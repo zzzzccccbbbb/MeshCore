@@ -192,7 +192,7 @@ void setup() {
     strncpy(ble_device_name, BLE_DEVICE_NAME, sizeof(ble_device_name) - 1);
     ble_device_name[sizeof(ble_device_name) - 1] = 0;
     bluetooth_interface.begin(BLE_NAME_PREFIX, ble_device_name, the_mesh.getBLEPin());
-    // Keep OLED/App default name in sync with BLE (Meshnology-XXXX), unless user renamed
+    // Keep OLED/App default name in sync with BLE, unless user renamed
     {
       NodePrefs *prefs = the_mesh.getNodePrefs();
       bool sync = (strcmp(prefs->node_name, "@@MAC4") == 0 ||
@@ -201,12 +201,31 @@ void setup() {
 #ifdef ADVERT_NAME
       sync = sync || (strcmp(prefs->node_name, ADVERT_NAME) == 0);
 #endif
-      // Migrate previous fixed model defaults
+      // Migrate previous fixed model defaults / factory-style "Meshnology-XXXX" (old MAC4 BLE name)
       sync = sync || (strcmp(prefs->node_name, "Meshnology-W12") == 0 ||
                       strcmp(prefs->node_name, "Meshnology-W13") == 0 ||
-                      strcmp(prefs->node_name, "Meshnology-W15") == 0);
+                      strcmp(prefs->node_name, "Meshnology-W15") == 0 ||
+                      strcmp(prefs->node_name, "Meshnology-M19") == 0);
+      sync = sync || (strncasecmp(prefs->node_name, "Meshnology-", 11) == 0);
+      // Prior M19 build wrote 6-hex BLE MAC onto the screen; re-migrate to W13-style 8-hex pub key
+      if (!sync && strcmp(BLE_DEVICE_NAME, "@@MAC6") == 0 && strlen(prefs->node_name) == 6) {
+        bool hex6 = true;
+        for (int i = 0; i < 6 && hex6; i++) {
+          char c = prefs->node_name[i];
+          hex6 = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+        }
+        sync = hex6;
+      }
       if (sync) {
-        snprintf(prefs->node_name, sizeof(prefs->node_name), "%s%s", BLE_NAME_PREFIX, ble_device_name);
+        // W13/M19 (@@MAC6): screen = identity pub_key[0..3] as 8 hex; BLE name stays MAC6
+        if (strcmp(BLE_DEVICE_NAME, "@@MAC6") == 0) {
+          char pub_key_hex[10];
+          mesh::Utils::toHex(pub_key_hex, the_mesh.self_id.pub_key, 4);
+          strncpy(prefs->node_name, pub_key_hex, sizeof(prefs->node_name) - 1);
+          prefs->node_name[sizeof(prefs->node_name) - 1] = 0;
+        } else {
+          snprintf(prefs->node_name, sizeof(prefs->node_name), "%s%s", BLE_NAME_PREFIX, ble_device_name);
+        }
         the_mesh.savePrefs();
       }
     }

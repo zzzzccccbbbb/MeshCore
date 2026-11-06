@@ -27,15 +27,28 @@ protected:
   mesh::MainBoard* _board;
   MultiSerialInterface* _interfaceManager;
   bool _connected;
+  mutable uint16_t _cached_batt_mv;
+  mutable unsigned long _next_batt_sample;
 
   AbstractUITask(mesh::MainBoard* board, MultiSerialInterface* interfaceManager) : _board(board), _interfaceManager(interfaceManager) {
     _connected = false;
+    _cached_batt_mv = 0;
+    _next_batt_sample = 0;
   }
 
 public:
   void setHasConnection(bool connected) { _connected = connected; }
   bool hasConnection() const { return _connected; }
-  uint16_t getBattMilliVolts() const { return _board->getBattMilliVolts(); }
+  /** Cached battery reading (~1.5s) so title bar / sensors pages stay consistent. */
+  uint16_t getBattMilliVolts() const {
+    unsigned long now = millis();
+    if (_cached_batt_mv == 0 || (long)(now - _next_batt_sample) >= 0) {
+      _cached_batt_mv = _board->getBattMilliVolts();
+      _next_batt_sample = now + 1500;
+    }
+    return _cached_batt_mv;
+  }
+  bool isExternalPowered() const { return _board->isExternalPowered(); }
   bool isBluetoothEnabled() const { return _interfaceManager->isBluetoothEnabled(); }
   void enableBluetooth() { _interfaceManager->enableBluetooth(); }
   void disableBluetooth() { _interfaceManager->disableBluetooth(); }
