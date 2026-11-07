@@ -2856,6 +2856,8 @@ static void exit4_3(void)
 {
     s_wifi_ota_start_cancel = true;
     w20_wifi_ota_abort_start();
+    /* 先藏弹层，避免 stop 短暂阻塞时墨水仍停在 ERASING */
+    wifi_ota_set_erase_overlay_visible(false);
     if (wifi_ota_deferred_timer) {
         lv_timer_del(wifi_ota_deferred_timer);
         wifi_ota_deferred_timer = NULL;
@@ -2863,10 +2865,10 @@ static void exit4_3(void)
     }
     /* 等后台重连任务退出，避免下次进 OTA 被旧任务挡住 */
     const unsigned long t0 = millis();
-    while (s_wifi_ota_start_task != nullptr && (millis() - t0) < 2500) {
-        delay(20);
+    while (s_wifi_ota_start_task != nullptr && (millis() - t0) < 800) {
+        delay(10);
     }
-    w20_wifi_ota_stop(); /* 内含 reclaim_heap + 解除 EPD suppress */
+    w20_wifi_ota_stop(); /* 内含 reclaim_heap + 解除 EPD suppress；应 <1s */
     s_wifi_ota_paint_waits = 0;
     factory_set_epd_flush_suppressed(false);
     factory_resume_flush_timer();

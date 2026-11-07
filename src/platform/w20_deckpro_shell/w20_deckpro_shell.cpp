@@ -1711,13 +1711,10 @@ void w20_deckpro_shell_init(void)
 
 void w20_deckpro_shell_loop(void)
 {
-    /* 固件上传中：只跑 HTTP/OTA，跳过电池/KEY/LVGL/射频，显著减负 */
-    if (w20_wifi_ota_is_busy()) {
-        w20_wifi_ota_loop();
-        w20_wifi_ota_loop();
-        w20_wifi_ota_loop();
-        return; /* 无 delay：尽快回到 handleClient */
-    }
+    /*
+     * HTTP handleClient 已在独立任务 w20OtaHttp：busy 时也必须继续 LVGL/触控。
+     * 旧逻辑此处 return 跳过 UI → 断流后板子假死。
+     */
 
     /* 软睡中也要 poll：5min 已睡 → 继续计到 10min 真关机 */
     w20_auto_off_poll();

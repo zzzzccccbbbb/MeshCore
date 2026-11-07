@@ -12,12 +12,24 @@
 #include "main.h"
 #include "peripheral.h"
 
-/* 大文件 OTA 需更长 TCP 等待；默认 5s 会在 esp_ota 写 Flash 时导致 PC 断连 */
+/*
+ * HTTP 在独立任务：超时只影响 OTA 任务，不堵 UI。
+ * 读超时宜短：stop/返回时靠 client.stop() 打断；3s 内应能 join。
+ */
 #ifndef HTTP_MAX_SEND_WAIT
-#define HTTP_MAX_SEND_WAIT 120000
+#define HTTP_MAX_SEND_WAIT 5000
 #endif
 #ifndef HTTP_MAX_DATA_WAIT
-#define HTTP_MAX_DATA_WAIT 120000
+#define HTTP_MAX_DATA_WAIT 3000
+#endif
+#ifndef W20_WIFI_OTA_HTTP_TASK_STACK
+#define W20_WIFI_OTA_HTTP_TASK_STACK 6144
+#endif
+#ifndef W20_WIFI_OTA_HTTP_TASK_PRIO
+#define W20_WIFI_OTA_HTTP_TASK_PRIO 1
+#endif
+#ifndef W20_WIFI_OTA_HTTP_JOIN_MS
+#define W20_WIFI_OTA_HTTP_JOIN_MS 800
 #endif
 /* 默认 1436 偏碎；加大减少 WebServer/esp_ota_write 次数（静态缓冲） */
 #ifndef HTTP_UPLOAD_BUFLEN
@@ -39,7 +51,40 @@
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <esp_task_wdt.h>
+#include <esp32-hal.h>
 #include <cstring>
+
+/**
+ * 预擦关 cache 时 IDLE0 无法喂狗 → TASK_WDT（实测挂的是 IDLE0）。
+ * 只卸 Core0；Core1 IDLE 常未加入 WDT，disableCore1WDT 会打
+ * "Failed to remove Core 1 IDLE..."，属正常，不是擦除失败。
+ */
+struct OtaFlashWdtGuard {
+    bool disarmed0 = false;
+    void arm(void)
+    {
+        if (disarmed0) {
+            return;
+        }
+        /* 本树 Arduino：disableCore0WDT 为 void（新版才返回 bool） */
+        disableCore0WDT();
+        disarmed0 = true;
+        W20_WIFI_LOGLN("[W20WifiOta] Core0 WDT disabled for pre-erase");
+    }
+    void disarm(void)
+    {
+        if (!disarmed0) {
+            return;
+        }
+        enableCore0WDT();
+        disarmed0 = false;
+        W20_WIFI_LOGLN("[W20WifiOta] Core0 WDT re-enabled");
+    }
+    ~OtaFlashWdtGuard()
+    {
+        disarm();
+    }
+};
 
 /** W20 16MB 分区表 app0/app1 各 0x480000；旧 4MB 表 ota_1 仅 0xA0000 会导致写满后失败 */
 static constexpr size_t kW20OtaSlotRecommendedBytes = 0x480000;
@@ -67,8 +112,13 @@ static uint8_t s_prepCreateFailCount = 0;
 static esp_ota_handle_t s_otaHandle = 0;
 static const esp_partition_t *s_updatePart = nullptr;
 static size_t s_written = 0;
-static int s_progress = -1;
-/** 预擦 0–100；非擦除阶段为 -1 */
+static volatile int s_progress = -1;
+/** 上次 UPLOAD WRITE/START；HTTP 任务内做 stall（断流时常仍 SoftAP clients=1） */
+static volatile uint32_t s_uploadActivityMs = 0;
+static constexpr uint32_t kOtaUploadStallMs = 6000;
+static TaskHandle_t s_httpTask = nullptr;
+static volatile bool s_httpTaskRun = false;
+/** 预擦 0-100；非擦除阶段为 -1 */
 static volatile int s_erasePct = -1;
 /** 擦完后短暂允许 EPD（绕过 is_running 禁刷） */
 static volatile bool s_epdPaintAllowed = false;
@@ -135,7 +185,7 @@ static bool otaSendProgmemChunks(PGM_P page)
     char buf[512];
     for (size_t off = 0; off < len;) {
         if (!s_http->client().connected()) {
-            Serial.printf("[W20WifiOta] HTML send abort off=%u/%u (client gone)\n", (unsigned)off,
+            W20_WIFI_LOG("[W20WifiOta] HTML send abort off=%u/%u (client gone)\n", (unsigned)off,
                           (unsigned)len);
             return false;
         }
@@ -145,7 +195,7 @@ static bool otaSendProgmemChunks(PGM_P page)
         memcpy_P(buf, page + off, n);
         s_http->sendContent(buf, n);
         if (!s_http->client().connected()) {
-            Serial.printf("[W20WifiOta] HTML send dropped off=%u/%u\n", (unsigned)(off + n), (unsigned)len);
+            W20_WIFI_LOG("[W20WifiOta] HTML send dropped off=%u/%u\n", (unsigned)(off + n), (unsigned)len);
             return false;
         }
         off += n;
@@ -219,7 +269,7 @@ static const char OTA_PAGE_READY[] PROGMEM =
     "if(j.progress>=0)prog(j.progress,j.failed?'Failed':(j.done?'Writing done':'Flashing'));"
     "if(j.failed){clearInterval(T);T=null;msg(j.status||'Upgrade failed','er');"
     "document.getElementById('btn').disabled=0;}"
-    "if(j.done){clearInterval(T);T=null;prog(100,'Done');msg('Flash complete — rebooting','ok');}"
+    "if(j.done){clearInterval(T);T=null;prog(100,'Done');msg('Flash complete - rebooting','ok');}"
     "}).catch(function(){});}"
     "document.getElementById('f').onsubmit=function(e){"
     "if(!sel||!okName(sel.name)){e.preventDefault();msg('Please select a valid firmware file','er');return;}"
@@ -229,7 +279,7 @@ static const char OTA_PAGE_READY[] PROGMEM =
     "x.open('POST','/ota/upload');"
     "x.upload.onprogress=function(ev){if(ev.lengthComputable){"
     "prog(Math.min(99,Math.round(ev.loaded*100/ev.total)),'Uploading');}};"
-    "x.onload=function(){if(x.status===200){prog(100,'Done');msg('Flash complete — rebooting','ok');}"
+    "x.onload=function(){if(x.status===200){prog(100,'Done');msg('Flash complete - rebooting','ok');}"
     "else{msg('Upload or flash failed','er');document.getElementById('btn').disabled=0;}};"
     "x.onerror=function(){msg('Network error. Please retry.','er');document.getElementById('btn').disabled=0;};"
     "T=setInterval(poll,500);x.send(fd);};"
@@ -241,7 +291,7 @@ static const char OTA_PAGE_PREP[] PROGMEM =
     "<meta http-equiv=refresh content=2><title>w20 OTA</title>"
     "<style>body{margin:0;font-family:system-ui;background:#0c1117;color:#8b9cb3;padding:24px;text-align:center}"
     "h1{color:#e6edf5;font-size:16px}</style></head><body>"
-    "<h1>Erasing flash slot…</h1><p>One-time prepare (~30–60s). Page refreshes automatically.</p></body></html>";
+    "<h1>Erasing flash slot…</h1><p>One-time prepare (~30-60s). Page refreshes automatically.</p></body></html>";
 
 static const char OTA_PAGE_FAIL[] PROGMEM =
     "<!DOCTYPE html><html lang=en><head><meta charset=utf-8>"
@@ -287,6 +337,10 @@ static uint8_t s_otaWriteBuf[W20_OTA_WRITE_BUF];
 static size_t s_otaWriteBufLen = 0;
 static void otaLogWriteContext(size_t chunkLen, esp_err_t err);
 static void otaSetFailStatus(const char *shortMsg, esp_err_t err);
+static void otaFailDropSession(const char *msg, esp_err_t err);
+static void otaHttpTaskWatchdog(void);
+static bool otaStartHttpTask(void);
+static void otaStopHttpTask(void);
 
 static bool otaFlushWriteBuf(void)
 {
@@ -298,8 +352,7 @@ static bool otaFlushWriteBuf(void)
     const esp_err_t err = esp_ota_write(s_otaHandle, s_otaWriteBuf, n);
     if (err != ESP_OK) {
         otaLogWriteContext(n, err);
-        esp_ota_abort(s_otaHandle);
-        otaSetFailStatus("Write failed", err);
+        otaFailDropSession("Write failed", err);
         return false;
     }
     s_written += n;
@@ -318,13 +371,20 @@ static void otaAbortPreparedSession(void)
     s_prepRetryAfterMs = 0;
 }
 
+/** HTTP 任务只改 desire；真正碰 LVGL timer 必须在主循环 otaSyncEpdFlushFromMain */
+static volatile bool s_epdPauseDesired = false;
+
 static void otaSetEpdFlushPaused(bool pause)
 {
-    if (pause) {
-        /* 与 SoftAP 门户同级：硬 suppress，清 coalesce，避免开服后还 PART */
-        factory_set_epd_flush_suppressed(true);
-        factory_pause_flush_timer();
+    s_epdPauseDesired = pause;
+}
+
+static void otaSyncEpdFlushFromMain(void)
+{
+    if (s_epdPauseDesired) {
         if (!s_epdFlushPausedForUpload) {
+            factory_set_epd_flush_suppressed(true);
+            factory_pause_flush_timer();
             s_epdFlushPausedForUpload = true;
             W20_WIFI_LOGLN("[W20WifiOta] EPD flush paused for upload");
         }
@@ -341,7 +401,7 @@ static void otaSetEpdFlushPaused(bool pause)
 static void otaLogPartition(const esp_partition_t *part, const char *role)
 {
     if (!part) {
-        Serial.printf("[W20WifiOta] %s partition: (null)\n", role);
+        W20_WIFI_LOG("[W20WifiOta] %s partition: (null)\n", role);
         return;
     }
     W20_WIFI_LOG("[W20WifiOta] %s partition: label=%s subtype=%u addr=0x%06x size=%u (%u KB)\n", role, part->label,
@@ -358,7 +418,7 @@ static const esp_partition_t *otaPickFirmwareUpdatePartition(void)
         esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, nullptr);
 
     if (!app0 && !app1) {
-        Serial.println("[W20WifiOta] WARN: no ota_0/ota_1; fallback esp_ota_get_next_update_partition");
+        W20_WIFI_LOGLN("[W20WifiOta] WARN: no ota_0/ota_1; fallback esp_ota_get_next_update_partition");
         return esp_ota_get_next_update_partition(nullptr);
     }
 
@@ -396,16 +456,16 @@ static void otaLogWriteContext(size_t chunkLen, esp_err_t err)
     otaLogPartition(esp_ota_get_running_partition(), "running");
     otaLogPartition(s_updatePart, "target");
     if (err != ESP_OK) {
-        Serial.printf("[W20WifiOta] written=%u chunk=%u err=%s (0x%x)\n", (unsigned)s_written, (unsigned)chunkLen,
+        W20_WIFI_LOG("[W20WifiOta] written=%u chunk=%u err=%s (0x%x)\n", (unsigned)s_written, (unsigned)chunkLen,
                       esp_err_to_name(err), (unsigned)err);
     } else {
         W20_WIFI_LOG("[W20WifiOta] written=%u chunk=%u\n", (unsigned)s_written, (unsigned)chunkLen);
     }
     if (s_updatePart && s_written + chunkLen > s_updatePart->size) {
-        Serial.println("[W20WifiOta] hint: firmware larger than target OTA slot — full reflash with "
+        W20_WIFI_LOGLN("[W20WifiOta] hint: firmware larger than target OTA slot - full reflash with "
                        "partition-table-16MB.csv (erase + factory.bin)");
     } else if (s_updatePart && s_updatePart->size < kW20OtaSlotRecommendedBytes) {
-        Serial.printf("[W20WifiOta] hint: target slot only %u bytes (W20 needs ~%u per app slot)\n",
+        W20_WIFI_LOG("[W20WifiOta] hint: target slot only %u bytes (W20 needs ~%u per app slot)\n",
                       (unsigned)s_updatePart->size, (unsigned)kW20OtaSlotRecommendedBytes);
     }
 }
@@ -414,14 +474,133 @@ static void otaSetFailStatus(const char *shortMsg, esp_err_t err)
 {
     otaSetEpdFlushPaused(false);
     s_uploadFailed = true;
+    /* 必须清 progress，否则 is_busy 永真、UI 认为仍在上传 */
+    s_progress = -1;
+    s_uploadActivityMs = 0;
     if (err != ESP_OK) {
         snprintf(s_status, sizeof(s_status), "%s (%s)", shortMsg, esp_err_to_name(err));
     } else {
         strncpy(s_status, shortMsg, sizeof(s_status) - 1);
         s_status[sizeof(s_status) - 1] = '\0';
     }
-    /* 失败状态始终打串口，不受 W20_LOG_WIFI 控制 */
-    Serial.printf("[W20WifiOta] %s\n", s_status);
+    W20_WIFI_LOG("[W20WifiOta] %s\n", s_status);
+}
+
+static void otaFailDropSession(const char *msg, esp_err_t err)
+{
+    s_otaWriteBufLen = 0;
+    if (s_otaHandle) {
+        esp_ota_abort(s_otaHandle);
+        s_otaHandle = 0;
+    }
+    s_otaSessionReady = false;
+    otaSetFailStatus(msg, err);
+    s_otaPrepareFailed = true;
+    s_prepRetryAfterMs = millis() + 800;
+}
+
+/** HTTP 任务：断流 / stall / STA 掉线时解 session（不依赖主循环） */
+static void otaHttpTaskWatchdog(void)
+{
+    const bool busy =
+        s_progress >= 0 && s_progress < 100 && strcmp(s_status, "Success, rebooting") != 0;
+    if (!busy) {
+        return;
+    }
+    if (s_uploadActivityMs != 0 &&
+        (uint32_t)(millis() - s_uploadActivityMs) >= kOtaUploadStallMs) {
+        W20_WIFI_LOG("[W20WifiOta] upload stall %lums - drop session\n",
+                      (unsigned long)(millis() - s_uploadActivityMs));
+        otaFailDropSession("Upload stalled", ESP_OK);
+        return;
+    }
+    if (!s_apMode && WiFi.status() != WL_CONNECTED) {
+        W20_WIFI_LOGLN("[W20WifiOta] STA lost during upload - drop session");
+        otaFailDropSession("WiFi lost", ESP_OK);
+        return;
+    }
+    if (s_apMode && WiFi.softAPgetStationNum() == 0) {
+        W20_WIFI_LOGLN("[W20WifiOta] SoftAP client gone - drop session");
+        otaFailDropSession("Client gone", ESP_OK);
+    }
+}
+
+static void otaHttpTask(void *arg)
+{
+    (void)arg;
+    W20_WIFI_LOGLN("[W20WifiOta] HTTP task started");
+    /* 不加入 TWDT：handleClient 可堵 DATA_WAIT，避免误喂狗超时 */
+    while (s_httpTaskRun && s_running && s_http) {
+        otaHttpTaskWatchdog();
+        /* 单次 handleClient；堵在 DATA_WAIT 时本任务挂起，UI 主循环照常跑 */
+        s_http->handleClient();
+        const bool busy =
+            s_progress >= 0 && s_progress < 100 && strcmp(s_status, "Success, rebooting") != 0;
+        if (busy) {
+            taskYIELD();
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(2));
+        }
+    }
+    W20_WIFI_LOGLN("[W20WifiOta] HTTP task exit");
+    s_httpTask = nullptr;
+    vTaskDelete(nullptr);
+}
+
+static bool otaStartHttpTask(void)
+{
+    if (s_httpTask != nullptr) {
+        return true;
+    }
+    s_httpTaskRun = true;
+    BaseType_t ok = xTaskCreatePinnedToCore(otaHttpTask, "w20OtaHttp", W20_WIFI_OTA_HTTP_TASK_STACK,
+                                            nullptr, W20_WIFI_OTA_HTTP_TASK_PRIO, &s_httpTask,
+                                            1 /* APP_CPU，与 Arduino loop 同核 */);
+    if (ok != pdPASS) {
+        s_httpTask = nullptr;
+        s_httpTaskRun = false;
+        W20_WIFI_LOGLN("[W20WifiOta] HTTP task create failed");
+        return false;
+    }
+    return true;
+}
+
+/** 打断堵在 upload read 里的 handleClient，否则 stop 要等满 socket timeout */
+static void otaUnblockHttpClient(void)
+{
+    if (!s_http) {
+        return;
+    }
+    /* 本树 WebServer::client() 按值返回 WiFiClient，不能绑非 const 引用 */
+    {
+        WiFiClient cli = s_http->client();
+        if (cli) {
+            cli.stop();
+        }
+    }
+    s_http->stop();
+    if (s_apMode) {
+        /* SoftAP 踢站，逼 TCP RST，比干等 DATA_WAIT 快 */
+        esp_wifi_deauth_sta(0);
+    }
+}
+
+static void otaStopHttpTask(void)
+{
+    s_httpTaskRun = false;
+    otaUnblockHttpClient();
+    if (s_httpTask == nullptr) {
+        return;
+    }
+    const unsigned long t0 = millis();
+    while (s_httpTask != nullptr && (millis() - t0) < (unsigned long)W20_WIFI_OTA_HTTP_JOIN_MS) {
+        delay(5);
+    }
+    if (s_httpTask != nullptr) {
+        W20_WIFI_LOGLN("[W20WifiOta] HTTP task join timeout - force delete");
+        vTaskDelete(s_httpTask);
+        s_httpTask = nullptr;
+    }
 }
 
 /**
@@ -431,6 +610,11 @@ static void otaSetFailStatus(const char *shortMsg, esp_err_t err)
  */
 static void otaWaitReadyUiPaint(uint32_t guide_timeout_ms, uint32_t settle_ms)
 {
+    /*
+     * 必须先清 s_epdPauseDesired：否则主循环 otaSyncEpdFlushFromMain
+     * 会立刻再次 suppress，墨水停在 ERASING 弹层（实测）。
+     */
+    s_epdPauseDesired = false;
     s_uiGuidePainted = false;
     s_epdPaintAllowed = true;
     s_epdFlushPausedForUpload = false;
@@ -441,7 +625,7 @@ static void otaWaitReadyUiPaint(uint32_t guide_timeout_ms, uint32_t settle_ms)
         esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(40));
     }
-    /* guide 已置位只表示 LVGL 改完，PART≈0.7–1.4s；此间保持 paint_allowed */
+    /* guide 已置位只表示 LVGL 改完，PART≈0.7-1.4s；此间保持 paint_allowed */
     const uint32_t t1 = millis();
     while (!s_abortRequested && (millis() - t1) < settle_ms) {
         esp_task_wdt_reset();
@@ -477,12 +661,16 @@ static bool otaPrepareSessionBody(void)
     otaSetEpdFlushPaused(true);
 
     {
+        /* 64KB + Core0 WDT 临时关闭；不必再缩到 16KB（块多/delay 多会明显变慢） */
         constexpr size_t kChunk = 64 * 1024;
         const size_t total = s_updatePart->size;
         const uint32_t t0 = millis();
         unsigned lastPct = 0;
+        OtaFlashWdtGuard wdtGuard;
+        wdtGuard.arm();
         for (size_t off = 0; off < total;) {
             if (s_abortRequested) {
+                wdtGuard.disarm();
                 s_erasePct = -1;
                 otaSetEpdFlushPaused(false);
                 setStatus("Cancelled");
@@ -496,6 +684,7 @@ static bool otaPrepareSessionBody(void)
             }
             const esp_err_t eraseErr = esp_partition_erase_range(s_updatePart, off, n);
             if (eraseErr != ESP_OK) {
+                wdtGuard.disarm();
                 s_erasePct = -1;
                 otaSetEpdFlushPaused(false);
                 otaLogWriteContext(0, eraseErr);
@@ -512,9 +701,9 @@ static bool otaPrepareSessionBody(void)
                 snprintf(msg, sizeof(msg), "Erasing flash %u%%", pct > 100u ? 100u : pct);
                 setStatus(msg);
             }
-            esp_task_wdt_reset();
             vTaskDelay(pdMS_TO_TICKS(1));
         }
+        wdtGuard.disarm();
         W20_WIFI_LOG("[W20WifiOta] pre-erase done %u KB in %lums\n", (unsigned)(total / 1024),
                       (unsigned long)(millis() - t0));
     }
@@ -566,7 +755,7 @@ static bool otaTryCreatePrepareTask(void)
             return true;
         }
         s_prepareTask = nullptr;
-        Serial.printf("[W20WifiOta] otaPrep xTaskCreate fail stack=%u (heap=%u)\n", (unsigned)kStacks[i],
+        W20_WIFI_LOG("[W20WifiOta] otaPrep xTaskCreate fail stack=%u (heap=%u)\n", (unsigned)kStacks[i],
                       (unsigned)ESP.getFreeHeap());
         delay(30);
     }
@@ -586,7 +775,7 @@ static void otaStartPrepareAsync(void)
     }
 
     s_prepCreateFailCount++;
-    Serial.printf("[W20WifiOta] otaPrep create failed #%u — inline fallback\n", (unsigned)s_prepCreateFailCount);
+    W20_WIFI_LOG("[W20WifiOta] otaPrep create failed #%u - inline fallback\n", (unsigned)s_prepCreateFailCount);
     setStatus("Preparing OTA...");
     if (otaPrepareSessionBody()) {
         s_prepCreateFailCount = 0;
@@ -597,7 +786,7 @@ static void otaStartPrepareAsync(void)
     setStatus("OTA prep retry soon");
     s_otaPrepareFailed = true;
     s_prepRetryAfterMs = millis() + 1500;
-    Serial.println("[W20WifiOta] OTA prep failed; will retry from loop");
+    W20_WIFI_LOGLN("[W20WifiOta] OTA prep failed; will retry from loop");
 }
 
 static bool otaFilenameAllowed(const String &filename)
@@ -639,12 +828,7 @@ static bool otaWritePayload(const uint8_t *data, size_t len)
 
 static void otaAbortWithStatus(const char *msg)
 {
-    s_otaWriteBufLen = 0;
-    if (s_otaHandle) {
-        esp_ota_abort(s_otaHandle);
-        s_otaHandle = 0;
-    }
-    otaSetFailStatus(msg, ESP_OK);
+    otaFailDropSession(msg, ESP_OK);
 }
 
 static void handleOtaUpload()
@@ -655,7 +839,7 @@ static void handleOtaUpload()
         s_uploadFailed = false;
         s_magicPending = true;
         s_written = 0;
-        s_progress = 0;
+        /* 校验通过前勿置 progress，避免早退永久 busy */
         setStatus("Receiving...");
 
         if (ui_wifi_provisioning_active()) {
@@ -667,7 +851,7 @@ static void handleOtaUpload()
         if (!otaFilenameAllowed(upload.filename)) {
             s_uploadFailed = true;
             setStatus("Name need w20");
-            Serial.printf("[W20WifiOta] reject filename: %s\n", upload.filename.c_str());
+            W20_WIFI_LOG("[W20WifiOta] reject filename: %s\n", upload.filename.c_str());
             return;
         }
         W20_WIFI_LOG("[W20WifiOta] accept filename: %s\n", upload.filename.c_str());
@@ -675,12 +859,11 @@ static void handleOtaUpload()
         if (s_prepareTask != nullptr) {
             s_uploadFailed = true;
             setStatus("OTA preparing, retry");
-            Serial.println("[W20WifiOta] upload rejected: prepare still in progress");
+            W20_WIFI_LOGLN("[W20WifiOta] upload rejected: prepare still in progress");
             return;
         }
         if (!s_otaSessionReady || !s_otaHandle) {
             if (s_otaPrepareFailed || s_prepareTask == nullptr) {
-                /* 上次失败或尚未启动：再试一次，让浏览器重传 */
                 otaStartPrepareAsync();
             }
             s_uploadFailed = true;
@@ -691,14 +874,15 @@ static void handleOtaUpload()
         otaLogPartition(esp_ota_get_running_partition(), "running");
         otaLogPartition(s_updatePart, "target");
         if (s_updatePart && s_updatePart->size < kW20OtaSlotRecommendedBytes) {
-            Serial.printf("[W20WifiOta] WARN: target slot %u bytes < recommended %u — upgrade may fail; "
+            W20_WIFI_LOG("[W20WifiOta] WARN: target slot %u bytes < recommended %u - upgrade may fail; "
                           "use partition-table-16MB.csv + full factory flash\n",
                           (unsigned)s_updatePart->size, (unsigned)kW20OtaSlotRecommendedBytes);
         }
 
+        s_progress = 0;
+        s_uploadActivityMs = millis();
         otaSetEpdFlushPaused(true);
         s_otaWriteBufLen = 0;
-        /* 上传时再确认 PS（勿改 bandwidth/TxPower） */
         w20_wifi_ota_rf_boost();
         W20_WIFI_LOG("[W20WifiOta] OTA session ready, upload total (incl magic)=%u bytes\n",
                       (unsigned)upload.totalSize);
@@ -706,6 +890,7 @@ static void handleOtaUpload()
         if (s_uploadFailed) {
             return;
         }
+        s_uploadActivityMs = millis();
         esp_task_wdt_reset();
         if (s_magicPending) {
             if (upload.currentSize < 1) {
@@ -713,7 +898,7 @@ static void handleOtaUpload()
                 return;
             }
             if (upload.buf[0] != W20_WIFI_OTA_FILE_MAGIC) {
-                Serial.printf("[W20WifiOta] bad magic 0x%02x want 0x%02x\n", upload.buf[0], W20_WIFI_OTA_FILE_MAGIC);
+                W20_WIFI_LOG("[W20WifiOta] bad magic 0x%02x want 0x%02x\n", upload.buf[0], W20_WIFI_OTA_FILE_MAGIC);
                 otaAbortWithStatus("Bad file header");
                 return;
             }
@@ -724,7 +909,6 @@ static void handleOtaUpload()
         } else if (!otaWritePayload(upload.buf, upload.currentSize)) {
             return;
         }
-        /* 进度：totalSize 常为 0（分块上传），用已写入估算到 99 */
         if (upload.totalSize > 1) {
             s_progress = (int)((s_written * 100) / (upload.totalSize - 1));
         } else if (s_updatePart && s_updatePart->size > 0) {
@@ -746,7 +930,10 @@ static void handleOtaUpload()
         s_otaHandle = 0;
         if (endErr != ESP_OK) {
             otaLogWriteContext(0, endErr);
+            s_otaSessionReady = false;
             otaSetFailStatus("esp_ota_end failed", endErr);
+            s_otaPrepareFailed = true;
+            s_prepRetryAfterMs = millis() + 800;
             return;
         }
         const esp_err_t bootErr = esp_ota_set_boot_partition(s_updatePart);
@@ -758,15 +945,11 @@ static void handleOtaUpload()
         W20_WIFI_LOG("[W20WifiOta] flash OK written=%u target=%s\n", (unsigned)s_written,
                       s_updatePart ? s_updatePart->label : "?");
         s_progress = 100;
+        s_uploadActivityMs = 0;
         setStatus("Success, rebooting");
         rebootAtMsec = millis() + 3000;
     } else if (upload.status == UPLOAD_FILE_ABORTED) {
-        s_otaWriteBufLen = 0;
-        if (s_otaHandle) {
-            esp_ota_abort(s_otaHandle);
-            s_otaHandle = 0;
-        }
-        otaSetFailStatus("Upload aborted", ESP_OK);
+        otaFailDropSession("Upload aborted", ESP_OK);
     }
 }
 
@@ -844,13 +1027,13 @@ bool w20_wifi_ota_prepare_sta(void)
         if (ui_wifi_sta_has_valid_ip()) {
             return true;
         }
-        W20_WIFI_LOGLN("[W20WifiOta] STA IP lost during settle — reconnect");
+        W20_WIFI_LOGLN("[W20WifiOta] STA IP lost during settle - reconnect");
     }
 
     /* 用户在 Config 点过 Disconnect：禁止 OTA 自动联网，提示去 Config 重配 */
     if (ui_wifi_user_hold_offline()) {
         setStatus("Use WIFI Config");
-        W20_WIFI_LOGLN("[W20WifiOta] hold offline — refuse auto reconnect");
+        W20_WIFI_LOGLN("[W20WifiOta] hold offline - refuse auto reconnect");
         return false;
     }
 
@@ -861,7 +1044,7 @@ bool w20_wifi_ota_prepare_sta(void)
     }
 
     setStatus("Connecting WiFi...");
-    W20_WIFI_LOG("[W20WifiOta] STA not linked — reconnect ssid=%s mode=%d\n", config.network.wifi_ssid,
+    W20_WIFI_LOG("[W20WifiOta] STA not linked - reconnect ssid=%s mode=%d\n", config.network.wifi_ssid,
                   (int)WiFi.getMode());
     /* SoftAP 刚拆完时务必干净切到 STA 再 begin */
     WiFi.persistent(false);
@@ -923,12 +1106,12 @@ static bool otaHeapOkOrFail(void)
     W20_WIFI_LOG("[W20WifiOta] heap before HTTP %u\n", (unsigned)heap);
     if (heap < W20_WIFI_OTA_HARD_MIN_HEAP) {
         setStatus("Low memory, retry");
-        Serial.printf("[W20WifiOta] start rejected: low heap %u (need >= %u)\n", (unsigned)heap,
+        W20_WIFI_LOG("[W20WifiOta] start rejected: low heap %u (need >= %u)\n", (unsigned)heap,
                       (unsigned)W20_WIFI_OTA_HARD_MIN_HEAP);
         return false;
     }
     if (heap < W20_WIFI_OTA_MIN_HEAP) {
-        Serial.printf("[W20WifiOta] low heap %u (ideal >= %u) — start anyway\n", (unsigned)heap,
+        W20_WIFI_LOG("[W20WifiOta] low heap %u (ideal >= %u) - start anyway\n", (unsigned)heap,
                       (unsigned)W20_WIFI_OTA_MIN_HEAP);
     }
     return true;
@@ -941,12 +1124,20 @@ static bool otaBeginHttpAndPrep(bool ap_mode)
     w20_wifi_ota_rf_boost();
     if (!beginOtaHttpServer()) {
         setStatus("HTTP start failed");
-        Serial.println("[W20WifiOta] HTTP begin failed");
+        W20_WIFI_LOGLN("[W20WifiOta] HTTP begin failed");
         s_http = nullptr;
         return false;
     }
     s_apMode = ap_mode;
     s_running = true;
+    if (!otaStartHttpTask()) {
+        s_http->stop();
+        s_running = false;
+        s_http = nullptr;
+        s_apMode = false;
+        setStatus("HTTP task failed");
+        return false;
+    }
     otaStartPrepareAsync();
     char url[64] = {0};
     w20_wifi_ota_get_url(url, sizeof(url));
@@ -973,7 +1164,7 @@ bool w20_wifi_ota_start(void)
     ensureProvisioningStoppedForOta();
     if (ui_wifi_provisioning_active()) {
         setStatus("Close WIFI Config");
-        Serial.println("[W20WifiOta] start blocked: provisioning AP still up");
+        W20_WIFI_LOGLN("[W20WifiOta] start blocked: provisioning AP still up");
         return false;
     }
     if (s_abortRequested) {
@@ -992,7 +1183,7 @@ bool w20_wifi_ota_start(void)
     if (preferSta) {
         W20_WIFI_LOGLN("[W20WifiOta] start (STA LAN)...");
         if (!w20_wifi_ota_prepare_sta()) {
-            Serial.println("[W20WifiOta] STA prepare failed — fallback SoftAP");
+            W20_WIFI_LOGLN("[W20WifiOta] STA prepare failed - fallback SoftAP");
         } else if (s_abortRequested) {
             setStatus("Cancelled");
             return false;
@@ -1003,7 +1194,7 @@ bool w20_wifi_ota_start(void)
                 delay(150);
             }
             if (!ui_wifi_sta_has_valid_ip()) {
-                W20_WIFI_LOGLN("[W20WifiOta] STA lost after SoftAP off — SoftAP fallback");
+                W20_WIFI_LOGLN("[W20WifiOta] STA lost after SoftAP off - SoftAP fallback");
             } else if (otaBeginHttpAndPrep(false)) {
                 return true;
             } else {
@@ -1016,7 +1207,7 @@ bool w20_wifi_ota_start(void)
     ui_wifi_pause_ble_for_radio();
     if (!ui_wifi_softap_begin(false, true)) {
         setStatus("SoftAP failed");
-        Serial.println("[W20WifiOta] SoftAP begin failed");
+        W20_WIFI_LOGLN("[W20WifiOta] SoftAP begin failed");
         return false;
     }
     if (!otaBeginHttpAndPrep(true)) {
@@ -1033,20 +1224,24 @@ void w20_wifi_ota_stop(void)
     s_uiGuidePainted = true; /* 打断 prep 等 UI 上墨 */
     s_epdPaintAllowed = false;
     otaSetEpdFlushPaused(false);
+    otaSyncEpdFlushFromMain(); /* stop 在 UI 线程：立刻恢复 EPD */
     s_prepRetryAfterMs = 0;
     s_prepCreateFailCount = 0;
+    s_progress = -1;
+    s_uploadActivityMs = 0;
+    s_erasePct = -1;
+    /* 先踢连接/关 listen，再短 join（勿再干等 18s DATA_WAIT） */
+    s_running = false;
+    otaStopHttpTask();
     const unsigned long t0 = millis();
-    /* 预擦会查 abort，通常很快退出；最多等一块擦完 */
-    while (s_prepareTask != nullptr && (millis() - t0) < 8000) {
+    while (s_prepareTask != nullptr && (millis() - t0) < 2000) {
         delay(10);
     }
     otaAbortPreparedSession();
-    s_erasePct = -1;
     const bool wasAp = s_apMode;
-    if (s_running && s_http) {
+    if (s_http) {
+        /* otaUnblock 里可能已 stop；再调一次无害 */
         s_http->stop();
-        s_running = false;
-        s_progress = -1;
         setStatus("Stopped");
         W20_WIFI_LOGLN("[W20WifiOta] Stopped");
     }
@@ -1063,51 +1258,49 @@ void w20_wifi_ota_loop(void)
 {
     /*
      * Meshtastic main loop used to honor rebootAtMsec after OTA.
-     * MeshCore stubs only store the variable — must reboot here or the browser
+     * MeshCore stubs only store the variable - must reboot here or the browser
      * shows 100% / "rebooting" while the device keeps running the old slot.
      */
     if (rebootAtMsec != 0 && (long)(millis() - rebootAtMsec) >= 0) {
-        Serial.println("[W20WifiOta] OTA OK — esp_restart()");
+        W20_WIFI_LOGLN("[W20WifiOta] OTA OK - esp_restart()");
         delay(200);
         esp_restart();
     }
 
-    if (!s_running || !s_http) {
+    if (!s_running) {
+        otaSyncEpdFlushFromMain();
         return;
     }
+    otaSyncEpdFlushFromMain();
     /* xTaskCreate / esp_ota_begin 曾失败：到期自动再试，避免只打一次日志后装聋 */
     if (!s_otaSessionReady && s_otaPrepareFailed && s_prepareTask == nullptr && !s_otaHandle &&
         s_prepRetryAfterMs != 0 && (long)(millis() - s_prepRetryAfterMs) >= 0 && s_prepCreateFailCount < 6) {
         W20_WIFI_LOGLN("[W20WifiOta] deferred OTA prep retry");
         otaStartPrepareAsync();
     }
-    /* 上传中少 yield、多轮 handleClient：写 Flash 已占时，外层狂 yield 只会拖慢 */
-    const bool busy = s_progress >= 0 && s_progress < 100 && strcmp(s_status, "Success, rebooting") != 0;
-    /* 空闲时每 5s 打 STA 心跳：区分「射频已断」vs「手机未进同网/AP 隔离」 */
+    /*
+     * handleClient 已在 w20OtaHttp 任务；此处只做心跳/轻量维护，绝不调用 handleClient，
+     * 否则主循环会再次被 DATA_WAIT 卡死。
+     */
+    const bool busy =
+        s_progress >= 0 && s_progress < 100 && strcmp(s_status, "Success, rebooting") != 0;
     if (!busy) {
         static uint32_t s_otaIdleHbMs = 0;
         const uint32_t now = millis();
         if (s_otaIdleHbMs == 0 || (uint32_t)(now - s_otaIdleHbMs) >= 5000u) {
             s_otaIdleHbMs = now;
             if (s_apMode) {
-                W20_WIFI_LOG("[W20WifiOta] idle hb SoftAP clients=%d ip=%s ready=%d heap=%u\n",
+                W20_WIFI_LOG("[W20WifiOta] idle hb SoftAP clients=%d ip=%s ready=%d heap=%u httpTask=%d\n",
                               (int)WiFi.softAPgetStationNum(), WiFi.softAPIP().toString().c_str(),
-                              (s_otaSessionReady && s_otaHandle) ? 1 : 0, (unsigned)ESP.getFreeHeap());
+                              (s_otaSessionReady && s_otaHandle) ? 1 : 0, (unsigned)ESP.getFreeHeap(),
+                              s_httpTask ? 1 : 0);
             } else {
-                W20_WIFI_LOG("[W20WifiOta] idle hb STA mode=%d sta=%d ip=%s rssi=%d ready=%d heap=%u\n",
+                W20_WIFI_LOG("[W20WifiOta] idle hb STA mode=%d sta=%d ip=%s rssi=%d ready=%d heap=%u "
+                              "httpTask=%d\n",
                               (int)WiFi.getMode(), (int)WiFi.status(), WiFi.localIP().toString().c_str(),
                               WiFi.RSSI(), (s_otaSessionReady && s_otaHandle) ? 1 : 0,
-                              (unsigned)ESP.getFreeHeap());
+                              (unsigned)ESP.getFreeHeap(), s_httpTask ? 1 : 0);
             }
-        }
-    }
-    const int httpPasses = busy ? 256 : 64;
-    for (int i = 0; i < httpPasses; i++) {
-        s_http->handleClient();
-        if (!busy && (i & 7) == 7) {
-            yield();
-        } else if (busy && (i & 63) == 63) {
-            esp_task_wdt_reset();
         }
     }
 }

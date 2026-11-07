@@ -39,7 +39,10 @@ bool w20_wifi_ota_start(void);
 /** Stop HTTP OTA；若为 SoftAP 模式则拆热点。 */
 void w20_wifi_ota_stop(void);
 
-/** Poll WebServer; call from shell_loop. */
+/**
+ * 轻量维护（reboot / prep retry / 心跳）。
+ * WebServer::handleClient 在独立任务 w20OtaHttp，勿在此阻塞读 HTTP。
+ */
 void w20_wifi_ota_loop(void);
 
 bool w20_wifi_ota_is_running(void);

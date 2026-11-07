@@ -126,7 +126,7 @@ pio run -e meshnology_w20_companion_radio_ble
 | `w20-firmware-ota.bin`（首字节魔数 `0x57`，`pio run` 自动生成） | 裸 `firmware.bin`（无魔数会被拒） |
 | | `firmware_full.bin` / factory（含 bootloader，不能网页 OTA） |
 
-上传中触控可能较卡；网页中途断开会中止本次写 Flash（`Upload aborted`），一般可重新打开页面再传。要彻底退出 OTA，返回离开该页即可。
+HTTP 在独立任务 `w20OtaHttp`：断流不堵 UI。返回/stop 会先 `client.stop()`+踢 SoftAP 站，约 1s 内退出（不再干等 15s+）。擦完靠清 `epdPauseDesired` 才能收起 ERASING 弹层。断传后可见 `Upload aborted` / `stalled` / `Client gone`。
 
 进 WiFi/OTA 会 **shutdown BLE controller**（可再恢复）；离开 WiFi 菜单后 BLE 会重新 begin。
 
