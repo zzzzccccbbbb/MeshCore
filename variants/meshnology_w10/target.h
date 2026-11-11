@@ -9,7 +9,7 @@
 #include <helpers/SensorManager.h>
 #include <helpers/sensors/EnvironmentSensorManager.h>
 #ifdef DISPLAY_CLASS
-  #include <helpers/ui/ST7796Display.h>
+  #include <helpers/ui/ST7789LCDDisplay.h>
   #include <helpers/ui/MomentaryButton.h>
 #endif
 

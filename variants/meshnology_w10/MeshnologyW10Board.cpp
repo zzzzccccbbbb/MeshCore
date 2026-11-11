@@ -1,5 +1,9 @@
 #include "MeshnologyW10Board.h"
 
+#ifndef W10_BATT_SPIKE_MV
+  #define W10_BATT_SPIKE_MV 800
+#endif
+
 #if defined(MESHNOLOGY_W10)
   #include "XPowersLib.h"
   static XPowersAXP2101 *w10_pmu = nullptr;
@@ -15,6 +19,16 @@ void MeshnologyW10Board::unlockSharedSpi() {
   if (_spiMutex) {
     xSemaphoreGive(_spiMutex);
   }
+}
+
+void MeshnologyW10Board::holdSharedSpiCsIdle() {
+  /* Match factory: inserted SD/LCD must not drive MISO during LoRa SPI. */
+  pinMode(P_LORA_NSS, OUTPUT);
+  digitalWrite(P_LORA_NSS, HIGH);
+  pinMode(PIN_TFT_CS, OUTPUT);
+  digitalWrite(PIN_TFT_CS, HIGH);
+  pinMode(PIN_SD_CS, OUTPUT);
+  digitalWrite(PIN_SD_CS, HIGH);
 }
 
 void MeshnologyW10Board::initGpsPins() {
@@ -46,6 +60,7 @@ void MeshnologyW10Board::initPmu() {
   w10_pmu->disableTSPinMeasure();
   w10_pmu->enableBattDetection();
   w10_pmu->enableBattVoltageMeasure();
+  w10_pmu->enableVbusVoltageMeasure();
   w10_pmu->setDC2Voltage(1000);
   w10_pmu->enableDC2();
   w10_pmu->setDC3Voltage(3300);
@@ -77,7 +92,10 @@ void MeshnologyW10Board::begin() {
 
   auto &mcp = Mcp23017Helper::instance();
   mcp.begin(Wire, 0x20);
+
+  holdSharedSpiCsIdle();
   mcp.powerOnPeripherals();
+  holdSharedSpiCsIdle();
 
   mcp.pinMode(MCP23017_PIN_INDEX(P_LORA_RESET), OUTPUT);
   mcp.pinMode(MCP23017_PIN_INDEX(P_LORA_DIO_1), INPUT);
@@ -105,11 +123,40 @@ void MeshnologyW10Board::powerOff() {
   enterDeepSleep(0, PIN_USER_BTN);
 }
 
-uint16_t MeshnologyW10Board::getBattMilliVolts() {
+bool MeshnologyW10Board::isExternalPowered() {
 #if defined(MESHNOLOGY_W10)
+  /* AXP2101: VBUS present or actively charging → show UI charge icon. */
   if (_pmuReady && w10_pmu) {
-    return (uint16_t)w10_pmu->getBattVoltage();
+    return w10_pmu->isVbusIn() || w10_pmu->isCharging();
   }
 #endif
+  return false;
+}
+
+uint16_t MeshnologyW10Board::getBattMilliVolts() {
+#if defined(MESHNOLOGY_W10)
+  if (!_pmuReady || !w10_pmu || !w10_pmu->isBatteryConnect()) {
+    return _batt_filt_ok ? (uint16_t)_batt_filt_mv : 0;
+  }
+
+  uint32_t mv = (uint32_t)w10_pmu->getBattVoltage();
+  if (mv == 0) {
+    return _batt_filt_ok ? (uint16_t)_batt_filt_mv : 0;
+  }
+
+  /* Light EMA + spike reject (same idea as M19 / factory). */
+  if (!_batt_filt_ok || _batt_filt_mv == 0) {
+    _batt_filt_mv = mv;
+    _batt_filt_ok = true;
+  } else {
+    int32_t d = (int32_t)mv - (int32_t)_batt_filt_mv;
+    if (d > W10_BATT_SPIKE_MV || d < -W10_BATT_SPIKE_MV) {
+      return (uint16_t)_batt_filt_mv;
+    }
+    _batt_filt_mv = (_batt_filt_mv * 7 + mv) / 8;
+  }
+  return (uint16_t)_batt_filt_mv;
+#else
   return 0;
+#endif
 }

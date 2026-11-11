@@ -38,6 +38,8 @@ bool radio_init() {
   Serial1.begin(9600, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
 #endif
 
+  /* Display may have used shared SPI first — keep all CS idle before LoRa. */
+  board.holdSharedSpiCsIdle();
   return radio.std_init(&board.sharedSpi);
 }
 

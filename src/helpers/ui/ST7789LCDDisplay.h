@@ -28,6 +28,9 @@ public:
 #if defined(MESHNOLOGY_M19)
 class MeshnologyM19Board;
 #endif
+#if defined(MESHNOLOGY_W10)
+class MeshnologyW10Board;
+#endif
 
 class ST7789LCDDisplay : public DisplayDriver {
   #if defined(LILYGO_TDECK) || defined(HELTEC_LORA_V4_TFT) || defined(HELTEC_V4_R8_TFT)
@@ -43,6 +46,10 @@ class ST7789LCDDisplay : public DisplayDriver {
   RefCountedDigitalPin* _peripher_power;
 #if defined(MESHNOLOGY_M19)
   MeshnologyM19Board* _m19_board;
+  void lockSpi();
+  void unlockSpi();
+#elif defined(MESHNOLOGY_W10)
+  MeshnologyW10Board* _w10_board;
   void lockSpi();
   void unlockSpi();
 #endif
@@ -61,6 +68,9 @@ public:
 #elif defined(MESHNOLOGY_M19)
   /* Shared HSPI with LoRa; panel RST via MCP23017 (PIN_TFT_RST=-1). */
   ST7789LCDDisplay(MeshnologyM19Board* board);
+#elif defined(MESHNOLOGY_W10)
+  /* Shared HSPI with LoRa/SD; ST7796 240x240 driven via ST7789 class + RGB332 FB. */
+  ST7789LCDDisplay(MeshnologyW10Board* board);
 #elif defined(MESHNOLOGY_W13)
   /* Dedicated SPI1 bus (PIN_SPI1_*), same FPC as factory ST7789 240x240. */
   ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64),

@@ -12,6 +12,8 @@
 class MeshnologyW10Board : public ESP32Board {
   SemaphoreHandle_t _spiMutex = nullptr;
   bool _pmuReady = false;
+  uint32_t _batt_filt_mv = 0;
+  bool _batt_filt_ok = false;
 
   void initPmu();
   void initGpsPins();
@@ -24,6 +26,7 @@ public:
   void begin();
   void lockSharedSpi();
   void unlockSharedSpi();
+  void holdSharedSpiCsIdle();
 
   uint32_t getIRQGpio() override {
     return 0;  // DIO1 is on MCP23017, not a direct GPIO
@@ -32,6 +35,7 @@ public:
   void enterDeepSleep(uint32_t secs, int pin_wake_btn = -1);
   void powerOff() override;
   uint16_t getBattMilliVolts() override;
+  bool isExternalPowered() override;
 
   const char *getManufacturerName() const override {
     return "Meshnology W10";

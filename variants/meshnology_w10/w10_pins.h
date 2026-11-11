@@ -38,6 +38,11 @@
   #define PIN_USER_BTN 0
 #endif
 
+/* Shared SPI CS — keep idle HIGH so SD/LCD cannot drive MISO during LoRa init. */
+#ifndef PIN_SD_CS
+  #define PIN_SD_CS 9
+#endif
+
 // ST7796 3.5" 240x240 square LCD (SPI2 shared with LoRa)
 #ifndef PIN_TFT_CS
   #define PIN_TFT_CS 10
