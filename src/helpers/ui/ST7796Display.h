@@ -12,9 +12,12 @@ class ST7796Display : public DisplayDriver {
   MeshnologyW10Board* _board;
   bool _isOn;
   uint16_t _color;
+  int _text_sz;
+  int16_t _font_ascent;  /* FreeFont: baseline offset from UI top-left Y */
 
   void lockSpi();
   void unlockSpi();
+  void applyLogicalTextSize(int sz);
 
 public:
   ST7796Display(MeshnologyW10Board* board);

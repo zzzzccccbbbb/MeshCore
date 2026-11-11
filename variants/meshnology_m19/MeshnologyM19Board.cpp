@@ -92,6 +92,16 @@ void MeshnologyM19Board::lcdResetPulse() {
   delay(120);
 }
 
+void MeshnologyM19Board::holdSharedSpiCsIdle() {
+  /* Match factory: inserted SD must not drive MISO during LoRa SPI. */
+  pinMode(P_LORA_NSS, OUTPUT);
+  digitalWrite(P_LORA_NSS, HIGH);
+  pinMode(PIN_TFT_CS, OUTPUT);
+  digitalWrite(PIN_TFT_CS, HIGH);
+  pinMode(PIN_SD_CS, OUTPUT);
+  digitalWrite(PIN_SD_CS, HIGH);
+}
+
 void MeshnologyM19Board::begin() {
   ESP32Board::begin();
 
@@ -112,11 +122,17 @@ void MeshnologyM19Board::begin() {
   mcpPinMode(P_LORA_RESET, OUTPUT);
   mcpPinMode(PIN_LCD_RST, OUTPUT);
   mcpPinMode(PIN_ADC_CTRL, OUTPUT);
+  mcpPinMode(M19_SD_PWDN, OUTPUT);
   mcpPinMode(M19_GPS_EN, OUTPUT);
   mcpPinMode(M19_GPS_RST, OUTPUT);
   mcpPinMode(M19_GPS_WKUP, OUTPUT);
 
+  /* MeshCore does not mount SD — keep powered down like factory default. */
+  mcpWrite(M19_SD_PWDN, HIGH);
+
+  holdSharedSpiCsIdle();
   powerRailsOn();
+  holdSharedSpiCsIdle();
   initGpsPins();
 
   sharedSpi.begin(P_LORA_SCLK, P_LORA_MISO, P_LORA_MOSI);

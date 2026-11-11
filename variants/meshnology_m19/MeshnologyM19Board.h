@@ -36,6 +36,7 @@ public:
   void unlockSharedSpi();
 
   void lcdResetPulse();
+  void holdSharedSpiCsIdle();
   void setGpsPower(bool on);
 
   void onBeforeTransmit(void) override;

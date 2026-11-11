@@ -135,7 +135,8 @@ void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code
   Bluefruit.begin();
  
   char dev_name[32+16];
-  if (strcmp(name, "@@MAC") == 0 || strcmp(name, "@@MAC4") == 0 || strcmp(name, "@@MAC6") == 0) {
+  if (strcmp(name, "@@MAC") == 0 || strcmp(name, "@@MAC4") == 0 ||
+      strcmp(name, "@@MAC6") == 0 || strcmp(name, "@@MAC8") == 0) {
     ble_gap_addr_t addr;
     if (sd_ble_gap_addr_get(&addr) == NRF_SUCCESS) {
       if (strcmp(name, "@@MAC4") == 0) {
@@ -144,6 +145,10 @@ void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code
         /* Last 3 bytes → 6 hex digits (factory-style without prefix). */
         sprintf(name, "%02X%02X%02X",
             addr.addr[2], addr.addr[1], addr.addr[0]);
+      } else if (strcmp(name, "@@MAC8") == 0) {
+        /* Last 4 bytes → 8 hex digits (screen == BLE). */
+        sprintf(name, "%02X%02X%02X%02X",
+            addr.addr[3], addr.addr[2], addr.addr[1], addr.addr[0]);
       } else {
         sprintf(name, "%02X%02X%02X%02X%02X%02X",    // modify (IN-OUT param)
             addr.addr[5], addr.addr[4], addr.addr[3], addr.addr[2], addr.addr[1], addr.addr[0]);

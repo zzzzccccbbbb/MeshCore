@@ -912,7 +912,7 @@ void MyMesh::begin(bool has_display) {
   }
 
 // if name is provided as a build flag, use that as default node name instead
-// Skip MAC placeholders (@@MAC / @@MAC4 / @@MAC6) — resolved later by BLE init.
+// Skip MAC placeholders (@@MAC / @@MAC4 / @@MAC6 / @@MAC8) — resolved later by BLE init.
 #ifdef ADVERT_NAME
   if (strncmp(ADVERT_NAME, "@@", 2) != 0) {
     strcpy(_prefs.node_name, ADVERT_NAME);

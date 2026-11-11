@@ -62,6 +62,9 @@
 #ifndef PIN_ADC_CTRL
   #define PIN_ADC_CTRL MCP23017_PIN(7)        /* GPA7, active-high */
 #endif
+#ifndef M19_SD_PWDN
+  #define M19_SD_PWDN MCP23017_PIN(0)         /* GPA0, 1=SD power-down (factory default) */
+#endif
 
 /* Board-managed GNSS (do NOT pass these to MicroNMEA — MCP pins). */
 #ifndef M19_GPS_EN
@@ -98,6 +101,11 @@
 
 #ifndef NEOPIXEL_LED
   #define NEOPIXEL_LED 46
+#endif
+
+/* Shared SPI CS — keep idle HIGH so SD/LCD never contend with LoRa. */
+#ifndef PIN_SD_CS
+  #define PIN_SD_CS 2
 #endif
 
 /* ST7789 240x240 — shared SPI with LoRa; RST via MCP (PIN_TFT_RST=-1). */

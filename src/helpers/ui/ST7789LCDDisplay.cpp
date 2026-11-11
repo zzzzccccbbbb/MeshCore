@@ -1,4 +1,8 @@
 #include "ST7789LCDDisplay.h"
+#include <Fonts/FreeSans12pt7b.h>
+#include <Fonts/FreeSans18pt7b.h>
+#include <Fonts/FreeSans24pt7b.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #if defined(MESHNOLOGY_M19)
@@ -19,6 +23,56 @@
 
 #ifndef DISPLAY_SCALE_Y
   #define DISPLAY_SCALE_Y 3.75f // 240 / 64
+#endif
+
+/* Adafruit setTextSize() takes int — float scale must be rounded, not truncated.
+ * M19 SCALE_X=1.875: size 1 used to become 1 (tiny); with round → 2. */
+#ifndef DISPLAY_TEXT_SCALE
+  #define DISPLAY_TEXT_SCALE DISPLAY_SCALE_X
+#endif
+
+static uint8_t scaledTextSize(int sz) {
+  if (sz < 1) sz = 1;
+  long n = lroundf((float)sz * (float)DISPLAY_TEXT_SCALE);
+  if (n < 1) n = 1;
+  if (n > 8) n = 8;
+  return (uint8_t)n;
+}
+
+#ifndef ST7789_USE_CLASSIC_FONT
+  #define ST7789_USE_FREESANS 1
+#endif
+
+#if ST7789_USE_FREESANS
+void ST7789LCDDisplay::applyLogicalTextSize(int sz) {
+  if (!_gfx) return;
+  _text_sz = (sz < 1) ? 1 : sz;
+  const GFXfont *font;
+  if (_text_sz <= 1) {
+    font = &FreeSans12pt7b;
+  } else if (_text_sz == 2) {
+    font = &FreeSans18pt7b;
+  } else {
+    font = &FreeSans24pt7b;
+  }
+  _gfx->setFont(font);
+  _gfx->setTextSize(1);
+  _gfx->setTextWrap(false);  /* right-align must not wrap at panel edge */
+  /* FreeFonts use baseline Y; UI passes top-left — cache ascent. */
+  int16_t x1, y1;
+  uint16_t bw, bh;
+  _gfx->getTextBounds("A", 0, 0, &x1, &y1, &bw, &bh);
+  _font_ascent = (y1 < 0) ? (int16_t)(-y1) : (int16_t)font->yAdvance;
+}
+#else
+void ST7789LCDDisplay::applyLogicalTextSize(int sz) {
+  if (!_gfx) return;
+  _text_sz = sz;
+  _font_ascent = 0;
+  _gfx->setFont(NULL);
+  _gfx->setTextSize(scaledTextSize(sz));
+  _gfx->setTextWrap(false);
+}
 #endif
 
 #ifndef DISPLAY_WIDTH
@@ -108,7 +162,8 @@ bool ST7789LCDDisplay::i2c_probe(TwoWire& wire, uint8_t addr) {
 ST7789LCDDisplay::ST7789LCDDisplay(MeshnologyM19Board* board)
   : DisplayDriver(128, 64),
     display(&board->sharedSpi, PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST),
-    _fb(NULL), _gfx(NULL), _peripher_power(NULL), _m19_board(board)
+    _fb(NULL), _gfx(NULL), _color(ST77XX_WHITE), _text_sz(1), _font_ascent(0),
+    _peripher_power(NULL), _m19_board(board)
 {
   _isOn = false;
 }
@@ -189,8 +244,10 @@ bool ST7789LCDDisplay::begin() {
     _gfx->fillScreen(ST77XX_BLACK);
     display.fillScreen(ST77XX_BLACK);
     _gfx->setTextColor(ST77XX_WHITE);
-    _gfx->setTextSize(2 * DISPLAY_SCALE_X);
+    applyLogicalTextSize(2);
+#if !ST7789_USE_FREESANS
     _gfx->cp437(true);
+#endif
 #if defined(MESHNOLOGY_M19)
     unlockSpi();
     if (PIN_TFT_LEDA_CTL != -1) {
@@ -236,12 +293,14 @@ void ST7789LCDDisplay::startFrame(ColorVal bkg) {
   if (!_gfx && !ensureFrameBuffer()) return;
   _gfx->fillScreen(bkg);
   _gfx->setTextColor(_color = UIColor::primary_txt);
-  _gfx->setTextSize(1 * DISPLAY_SCALE_X);
+  applyLogicalTextSize(1);
+#if !ST7789_USE_FREESANS
   _gfx->cp437(true);
+#endif
 }
 
 void ST7789LCDDisplay::setTextSize(int sz) {
-  if (_gfx) _gfx->setTextSize(sz * DISPLAY_SCALE_X);
+  applyLogicalTextSize(sz);
 }
 
 void ST7789LCDDisplay::setColor(ColorVal c) {
@@ -249,7 +308,14 @@ void ST7789LCDDisplay::setColor(ColorVal c) {
 }
 
 void ST7789LCDDisplay::setCursor(int x, int y) {
-  if (_gfx) _gfx->setCursor(x * DISPLAY_SCALE_X, y * DISPLAY_SCALE_Y);
+  if (!_gfx) return;
+  int16_t px = (int16_t)lroundf((float)x * (float)DISPLAY_SCALE_X);
+  int16_t py = (int16_t)lroundf((float)y * (float)DISPLAY_SCALE_Y);
+#if ST7789_USE_FREESANS
+  /* UI Y is top of text; FreeSans cursor is baseline. */
+  py = (int16_t)(py + _font_ascent);
+#endif
+  _gfx->setCursor(px, py);
 }
 
 void ST7789LCDDisplay::print(const char* str) {
@@ -296,7 +362,11 @@ uint16_t ST7789LCDDisplay::getTextWidth(const char* str) {
   int16_t x1, y1;
   uint16_t w, h;
   _gfx->getTextBounds(str, 0, 0, &x1, &y1, &w, &h);
-  return w / DISPLAY_SCALE_X;
+  /* Ceiling divide + left bearing so right-align cursor is not too far right. */
+  int32_t phys = (int32_t)w + ((x1 < 0) ? (int32_t)(-x1) : 0);
+  int32_t logical = (int32_t)ceilf((float)phys / (float)DISPLAY_SCALE_X);
+  if (logical < 1 && str && str[0]) logical = 1;
+  return (uint16_t)logical;
 }
 
 void ST7789LCDDisplay::endFrame() {

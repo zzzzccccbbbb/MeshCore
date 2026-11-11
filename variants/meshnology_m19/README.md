@@ -10,7 +10,7 @@ Pin/power truth source: factory firmware `~/esp32/m19/m19` (`board_pins.h`).
 | Radio / RF switch table | Like W12 (`CustomLR2021`, DIO5/6/9/10/11) |
 | MCP + shared SPI mutex | Like W10 (`Mcp23017Hal`) |
 | Display | W13 `ST7789LCDDisplay` framebuffer + M19 SPI lock |
-| BLE / node name | W13-style `@@MAC6` (6 hex, no prefix) |
+| BLE / node name | `@@MAC8` (8 hex MAC tail, screen == BLE, no prefix) |
 | Five-way | GPIO13 ADC ladder → `UI_HAS_JOYSTICK` (CENTER/LEFT/RIGHT); BOOT=back |
 
 Critical differences vs W12:

@@ -38,6 +38,8 @@ class ST7789LCDDisplay : public DisplayDriver {
   ST7789FrameGFX *_gfx;
   bool _isOn;
   uint16_t _color;
+  int _text_sz;
+  int16_t _font_ascent;  /* FreeFont: baseline offset from UI top-left Y */
   RefCountedDigitalPin* _peripher_power;
 #if defined(MESHNOLOGY_M19)
   MeshnologyM19Board* _m19_board;
@@ -47,11 +49,12 @@ class ST7789LCDDisplay : public DisplayDriver {
 
   bool i2c_probe(TwoWire& wire, uint8_t addr);
   bool ensureFrameBuffer();
+  void applyLogicalTextSize(int sz);
 public:
 #ifdef USE_PIN_TFT
   ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64),
       display(PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_SDA, PIN_TFT_SCL, PIN_TFT_RST),
-      _fb(NULL), _gfx(NULL), _peripher_power(peripher_power)
+      _fb(NULL), _gfx(NULL), _text_sz(1), _font_ascent(0), _peripher_power(peripher_power)
   {
     _isOn = false;
   }
@@ -62,7 +65,7 @@ public:
   /* Dedicated SPI1 bus (PIN_SPI1_*), same FPC as factory ST7789 240x240. */
   ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64),
       display(&SPI1, PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST),
-      _fb(NULL), _gfx(NULL), _peripher_power(peripher_power)
+      _fb(NULL), _gfx(NULL), _text_sz(1), _font_ascent(0), _peripher_power(peripher_power)
   {
     _isOn = false;
   }
@@ -70,14 +73,14 @@ public:
   ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64),
       displaySPI(HSPI),
       display(&displaySPI, PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST),
-      _fb(NULL), _gfx(NULL), _peripher_power(peripher_power)
+      _fb(NULL), _gfx(NULL), _text_sz(1), _font_ascent(0), _peripher_power(peripher_power)
   {
     _isOn = false;
   }
 #else
   ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64),
       display(&SPI, PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST),
-      _fb(NULL), _gfx(NULL), _peripher_power(peripher_power)
+      _fb(NULL), _gfx(NULL), _text_sz(1), _font_ascent(0), _peripher_power(peripher_power)
   {
     _isOn = false;
   }

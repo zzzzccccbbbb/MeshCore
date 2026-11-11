@@ -197,7 +197,8 @@ void setup() {
       NodePrefs *prefs = the_mesh.getNodePrefs();
       bool sync = (strcmp(prefs->node_name, "@@MAC4") == 0 ||
                    strcmp(prefs->node_name, "@@MAC") == 0 ||
-                   strcmp(prefs->node_name, "@@MAC6") == 0);
+                   strcmp(prefs->node_name, "@@MAC6") == 0 ||
+                   strcmp(prefs->node_name, "@@MAC8") == 0);
 #ifdef ADVERT_NAME
       sync = sync || (strcmp(prefs->node_name, ADVERT_NAME) == 0);
 #endif
@@ -207,18 +208,19 @@ void setup() {
                       strcmp(prefs->node_name, "Meshnology-W15") == 0 ||
                       strcmp(prefs->node_name, "Meshnology-M19") == 0);
       sync = sync || (strncasecmp(prefs->node_name, "Meshnology-", 11) == 0);
-      // Prior M19 build wrote 6-hex BLE MAC onto the screen; re-migrate to W13-style 8-hex pub key
-      if (!sync && strcmp(BLE_DEVICE_NAME, "@@MAC6") == 0 && strlen(prefs->node_name) == 6) {
-        bool hex6 = true;
-        for (int i = 0; i < 6 && hex6; i++) {
+      // Migrate old 6-hex BLE / 8-hex pub_key screen names → current BLE name (e.g. @@MAC8)
+      if (!sync && (strlen(prefs->node_name) == 6 || strlen(prefs->node_name) == 8)) {
+        bool hex_only = true;
+        for (size_t i = 0; prefs->node_name[i] && hex_only; i++) {
           char c = prefs->node_name[i];
-          hex6 = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+          hex_only = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
         }
-        sync = hex6;
+        sync = hex_only;
       }
       if (sync) {
-        // W13/M19 (@@MAC6): screen = identity pub_key[0..3] as 8 hex; BLE name stays MAC6
+        // Keep screen == BLE advertise name (prefix + resolved MAC / custom name)
         if (strcmp(BLE_DEVICE_NAME, "@@MAC6") == 0) {
+          // Legacy: screen shows identity pub_key[0..3] as 8 hex; BLE stays MAC6
           char pub_key_hex[10];
           mesh::Utils::toHex(pub_key_hex, the_mesh.self_id.pub_key, 4);
           strncpy(prefs->node_name, pub_key_hex, sizeof(prefs->node_name) - 1);

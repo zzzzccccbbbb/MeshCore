@@ -343,7 +343,8 @@ public:
     } else if (_page == HomePage::GPS) {
       LocationProvider* nmea = sensors.getLocationProvider();
       char buf[50];
-      int y = 18;
+      int y = 16;
+      const int row = 14;  /* FreeSans12 needs a bit more than classic 12px rows */
       bool gps_state = _task->getGPSState();
 #ifdef PIN_GPS_SWITCH
       bool hw_gps_state = digitalRead(PIN_GPS_SWITCH);
@@ -358,33 +359,33 @@ public:
       display.setColor(UIColor::primary_txt);
       display.drawTextLeftAlign(0, y, buf);
       if (nmea == NULL) {
-        y = y + 12;
+        y = y + row;
         display.setColor(UIColor::secondary_txt);
         display.drawTextLeftAlign(0, y, "Can't access GPS");
       } else {
         display.setColor(UIColor::primary_txt);
-        strcpy(buf, nmea->isValid()?"fix":"no fix");
-        display.drawTextRightAlign(display.width()-1, y, buf);
-        y = y + 12;
+        strcpy(buf, nmea->isValid() ? "fix" : "no fix");
+        display.drawTextRightAlign(display.width() - 1, y, buf);
+        y = y + row;
         display.setColor(UIColor::secondary_txt);
         display.drawTextLeftAlign(0, y, "sat");
         display.setColor(UIColor::primary_txt);
         sprintf(buf, "%d", nmea->satellitesCount());
-        display.drawTextRightAlign(display.width()-1, y, buf);
-        y = y + 12;
+        display.drawTextRightAlign(display.width() - 1, y, buf);
+        y = y + row;
         display.setColor(UIColor::secondary_txt);
         display.drawTextLeftAlign(0, y, "pos");
         display.setColor(UIColor::primary_txt);
-        sprintf(buf, "%.4f %.4f",
+        sprintf(buf, "%.3f %.3f",
           nmea->getLatitude()/1000000., nmea->getLongitude()/1000000.);
-        display.drawTextRightAlign(display.width()-1, y, buf);
-        y = y + 12;
+        display.drawTextRightAlign(display.width() - 1, y, buf);
+        y = y + row;
         display.setColor(UIColor::secondary_txt);
         display.drawTextLeftAlign(0, y, "alt");
         display.setColor(UIColor::primary_txt);
-        sprintf(buf, "%.2f", nmea->getAltitude()/1000.);
-        display.drawTextRightAlign(display.width()-1, y, buf);
-        y = y + 12;
+        sprintf(buf, "%.1f", nmea->getAltitude()/1000.);
+        display.drawTextRightAlign(display.width() - 1, y, buf);
+        y = y + row;
       }
 #endif
 #if UI_SENSORS_PAGE == 1

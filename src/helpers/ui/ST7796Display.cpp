@@ -1,5 +1,9 @@
 #include "ST7796Display.h"
 #include <MeshnologyW10Board.h>
+#include <Fonts/FreeSans12pt7b.h>
+#include <Fonts/FreeSans18pt7b.h>
+#include <Fonts/FreeSans24pt7b.h>
+#include <math.h>
 
 #ifndef DISPLAY_ROTATION
   #define DISPLAY_ROTATION 2
@@ -13,8 +17,29 @@
   #define DISPLAY_SCALE_Y 3.75f
 #endif
 
-#define DISPLAY_WIDTH 240
-#define DISPLAY_HEIGHT 240
+#ifndef DISPLAY_TEXT_SCALE
+  #define DISPLAY_TEXT_SCALE DISPLAY_SCALE_X
+#endif
+
+#ifndef DISPLAY_WIDTH
+  #define DISPLAY_WIDTH 240
+#endif
+
+#ifndef DISPLAY_HEIGHT
+  #define DISPLAY_HEIGHT 240
+#endif
+
+#ifndef ST7796_USE_CLASSIC_FONT
+  #define ST7796_USE_FREESANS 1
+#endif
+
+static uint8_t scaledTextSize(int sz) {
+  if (sz < 1) sz = 1;
+  long n = lroundf((float)sz * (float)DISPLAY_TEXT_SCALE);
+  if (n < 1) n = 1;
+  if (n > 8) n = 8;
+  return (uint8_t)n;
+}
 
 ColorVal UIColor::window_bkg = ST77XX_WHITE;
 ColorVal UIColor::title_bkg = ST77XX_BLUE;
@@ -30,7 +55,9 @@ ST7796Display::ST7796Display(MeshnologyW10Board* board)
   : DisplayDriver(128, 64),
     display(&board->sharedSpi, PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST),
     _board(board),
-    _isOn(false) {}
+    _isOn(false),
+    _text_sz(1),
+    _font_ascent(0) {}
 
 void ST7796Display::lockSpi() {
   if (_board) {
@@ -43,6 +70,35 @@ void ST7796Display::unlockSpi() {
     _board->unlockSharedSpi();
   }
 }
+
+#if ST7796_USE_FREESANS
+void ST7796Display::applyLogicalTextSize(int sz) {
+  _text_sz = (sz < 1) ? 1 : sz;
+  const GFXfont *font;
+  if (_text_sz <= 1) {
+    font = &FreeSans12pt7b;
+  } else if (_text_sz == 2) {
+    font = &FreeSans18pt7b;
+  } else {
+    font = &FreeSans24pt7b;
+  }
+  display.setFont(font);
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  int16_t x1, y1;
+  uint16_t bw, bh;
+  display.getTextBounds("A", 0, 0, &x1, &y1, &bw, &bh);
+  _font_ascent = (y1 < 0) ? (int16_t)(-y1) : (int16_t)font->yAdvance;
+}
+#else
+void ST7796Display::applyLogicalTextSize(int sz) {
+  _text_sz = sz;
+  _font_ascent = 0;
+  display.setFont(NULL);
+  display.setTextSize(scaledTextSize(sz));
+  display.setTextWrap(false);
+}
+#endif
 
 bool ST7796Display::begin() {
   if (_isOn) {
@@ -61,8 +117,10 @@ bool ST7796Display::begin() {
   display.setSPISpeed(40000000);
   display.fillScreen(ST77XX_BLACK);
   display.setTextColor(ST77XX_WHITE);
-  display.setTextSize(2 * DISPLAY_SCALE_X);
+  applyLogicalTextSize(2);
+#if !ST7796_USE_FREESANS
   display.cp437(true);
+#endif
   unlockSpi();
 
   _isOn = true;
@@ -94,14 +152,16 @@ void ST7796Display::startFrame(ColorVal bkg) {
   lockSpi();
   display.fillScreen(bkg);
   display.setTextColor(_color = UIColor::primary_txt);
-  display.setTextSize(1 * DISPLAY_SCALE_X);
+  applyLogicalTextSize(1);
+#if !ST7796_USE_FREESANS
   display.cp437(true);
+#endif
   unlockSpi();
 }
 
 void ST7796Display::setTextSize(int sz) {
   lockSpi();
-  display.setTextSize(sz * DISPLAY_SCALE_X);
+  applyLogicalTextSize(sz);
   unlockSpi();
 }
 
@@ -114,7 +174,12 @@ void ST7796Display::setColor(ColorVal c) {
 
 void ST7796Display::setCursor(int x, int y) {
   lockSpi();
-  display.setCursor(x * DISPLAY_SCALE_X, y * DISPLAY_SCALE_Y);
+  int16_t px = (int16_t)lroundf((float)x * (float)DISPLAY_SCALE_X);
+  int16_t py = (int16_t)lroundf((float)y * (float)DISPLAY_SCALE_Y);
+#if ST7796_USE_FREESANS
+  py = (int16_t)(py + _font_ascent);
+#endif
+  display.setCursor(px, py);
   unlockSpi();
 }
 
@@ -168,7 +233,10 @@ uint16_t ST7796Display::getTextWidth(const char* str) {
   uint16_t w, h;
   display.getTextBounds(str, 0, 0, &x1, &y1, &w, &h);
   unlockSpi();
-  return w / DISPLAY_SCALE_X;
+  int32_t phys = (int32_t)w + ((x1 < 0) ? (int32_t)(-x1) : 0);
+  int32_t logical = (int32_t)ceilf((float)phys / (float)DISPLAY_SCALE_X);
+  if (logical < 1 && str && str[0]) logical = 1;
+  return (uint16_t)logical;
 }
 
 void ST7796Display::endFrame() {
