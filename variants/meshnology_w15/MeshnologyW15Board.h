@@ -10,7 +10,20 @@
   #define PIN_VEXT_EN 45
 #endif
 
+#ifndef PIN_VBAT_READ
+  #define PIN_VBAT_READ 8   /* factory BOARD_BATTERY_ADC_GPIO */
+#endif
+
+#ifndef ADC_MULTIPLIER
+  /* Factory divider 100k/100k → ×2.0 */
+  #define ADC_MULTIPLIER 2.0f
+#endif
+
 class MeshnologyW15Board : public ESP32Board {
+  float adc_mult = ADC_MULTIPLIER;
+  uint32_t _batt_filt_mv = 0;
+  bool _batt_filt_ok = false;
+
 public:
   RefCountedDigitalPin periph_power;
 
@@ -62,9 +75,14 @@ public:
     enterDeepSleep(0);
   }
 
-  uint16_t getBattMilliVolts() override {
-    return 0;  // battery ADC not wired in current W15 firmware
+  uint16_t getBattMilliVolts() override;
+  bool isExternalPowered() override;
+
+  bool setAdcMultiplier(float multiplier) override {
+    adc_mult = (multiplier == 0.0f) ? ADC_MULTIPLIER : multiplier;
+    return true;
   }
+  float getAdcMultiplier() const override { return adc_mult; }
 
   const char *getManufacturerName() const override {
     return "Meshnology W15";
