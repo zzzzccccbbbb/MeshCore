@@ -229,8 +229,8 @@ int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t
     stats.n_recv_direct = getNumRecvDirect();
     stats.err_events = _err_flags;
     stats.last_snr = (int16_t)(radio_driver.getLastSNR() * 4);
-    stats.n_direct_dups = ((SimpleMeshTables *)getTables())->getNumDirectDups();
-    stats.n_flood_dups = ((SimpleMeshTables *)getTables())->getNumFloodDups();
+    stats.n_direct_dups = std::min<uint32_t>(((SimpleMeshTables *)getTables())->getNumDirectDups(), 0xFFFF);
+    stats.n_flood_dups = std::min<uint32_t>(((SimpleMeshTables *)getTables())->getNumFloodDups(), 0xFFFF);
     stats.total_rx_air_time_secs = getReceiveAirTime() / 1000;
     stats.n_recv_errors = radio_driver.getPacketsRecvErrors();
     memcpy(&reply_data[4], &stats, sizeof(stats));
@@ -704,7 +704,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
     memcpy(&sender_timestamp, data, 4); // timestamp (by sender's RTC clock - which could be wrong)
     uint8_t flags = (data[4] >> 2);        // message attempt number, and other flags
 
-    if (!(flags == TXT_TYPE_PLAIN || flags == TXT_TYPE_CLI_DATA)) {
+    if (!(flags == TXT_TYPE_PLAIN || flags == TXT_TYPE_CLI_DATA || flags == TXT_TYPE_CLI_COMMAND)) {
       MESH_DEBUG_PRINTLN("onPeerDataRecv: unsupported text type received: flags=%02x", (uint32_t)flags);
     } else if (sender_timestamp >= client->last_timestamp) { // prevent replay attacks
       bool is_retry = (sender_timestamp == client->last_timestamp);
@@ -730,7 +730,8 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
         }
       }
 
-      uint8_t temp[166];
+      // 5-byte datagram header + 3-byte reflected CLI prefix + 160-byte reply text + NUL
+      uint8_t temp[169];
       char *command = (char *)&data[5];
       char *reply = (char *)&temp[5];
       if (is_retry) {
@@ -790,6 +791,7 @@ void MyMesh::onControlDataRecv(mesh::Packet* packet) {
   uint8_t type = packet->payload[0] & 0xF0;    // just test upper 4 bits
   if (type == CTL_TYPE_NODE_DISCOVER_REQ && packet->payload_len >= 6
       && !_prefs.disable_fwd && discover_limiter.allow(rtc_clock.getCurrentTime())
+      && !isHiddenNode()   // this node wishes to NOT be discoverable
   ) {
     int i = 1;
     uint8_t  filter = packet->payload[i++];
@@ -982,8 +984,8 @@ void MyMesh::begin(FILESYSTEM *fs) {
   radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
                      radio_driver.getRxBoostedGainMode() ? "Enabled" : "Disabled");
-  board.setLoRaFemLnaEnabled(_prefs.radio_fem_rxgain);
-  board.setLoRaFemPaGainEnabled(_prefs.radio_fem_txgain);
+
+  board.attachDynamicPrefs(_prefs.getCustom());
 
   updateAdvertTimer();
   updateFloodAdvertTimer();

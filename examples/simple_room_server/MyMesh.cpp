@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include <algorithm>
 
 #define REPLY_DELAY_MILLIS          1500
 #define PUSH_NOTIFY_DELAY_MILLIS    2000
@@ -139,7 +140,7 @@ mesh::Packet *MyMesh::createSelfAdvert() {
 }
 
 File MyMesh::openAppend(const char *fname) {
-#if defined(NRF52_PLATFORM)
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   return _fs->open(fname, FILE_O_WRITE);
 #elif defined(RP2040_PLATFORM)
   return _fs->open(fname, "a");
@@ -170,8 +171,8 @@ int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t
     stats.n_recv_direct = getNumRecvDirect();
     stats.err_events = _err_flags;
     stats.last_snr = (int16_t)(radio_driver.getLastSNR() * 4);
-    stats.n_direct_dups = ((SimpleMeshTables *)getTables())->getNumDirectDups();
-    stats.n_flood_dups = ((SimpleMeshTables *)getTables())->getNumFloodDups();
+    stats.n_direct_dups = std::min<uint32_t>(((SimpleMeshTables *)getTables())->getNumDirectDups(), 0xFFFF);
+    stats.n_flood_dups = std::min<uint32_t>(((SimpleMeshTables *)getTables())->getNumFloodDups(), 0xFFFF);
     stats.n_posted = _num_posted;
     stats.n_post_push = _num_post_pushes;
 
@@ -443,7 +444,7 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
     memcpy(&sender_timestamp, data, 4); // timestamp (by sender's RTC clock - which could be wrong)
     uint8_t flags = (data[4] >> 2);        // message attempt number, and other flags
 
-    if (!(flags == TXT_TYPE_PLAIN || flags == TXT_TYPE_CLI_DATA)) {
+    if (!(flags == TXT_TYPE_PLAIN || flags == TXT_TYPE_CLI_DATA || flags == TXT_TYPE_CLI_COMMAND)) {
       MESH_DEBUG_PRINTLN("onPeerDataRecv: unsupported command flags received: flags=%02x", (uint32_t)flags);
     } else if (sender_timestamp >= client->last_timestamp) { // prevent replay attacks, but send Acks for retries
       bool is_retry = (sender_timestamp == client->last_timestamp);
@@ -461,9 +462,10 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
       mesh::Utils::sha256((uint8_t *)&ack_hash, 4, data, 5 + strlen((char *)&data[5]), client->id.pub_key,
                           PUB_KEY_SIZE);
 
-      uint8_t temp[166];
+      // 5-byte datagram header + 3-byte reflected CLI prefix + 160-byte reply text + NUL
+      uint8_t temp[169];
       bool send_ack;
-      if (flags == TXT_TYPE_CLI_DATA) {
+      if (flags == TXT_TYPE_CLI_DATA || flags == TXT_TYPE_CLI_COMMAND) {
         if (client->isAdmin()) {
           if (is_retry) {
             temp[5] = 0; // no reply
@@ -725,8 +727,8 @@ void MyMesh::begin(FILESYSTEM *fs) {
   radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_driver.setTxPower(_prefs.tx_power_dbm);
   radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
-  board.setLoRaFemLnaEnabled(_prefs.radio_fem_rxgain);
-  board.setLoRaFemPaGainEnabled(_prefs.radio_fem_txgain);
+
+  board.attachDynamicPrefs(_prefs.getCustom());
 
   updateAdvertTimer();
   updateFloodAdvertTimer();
@@ -781,7 +783,7 @@ void MyMesh::applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, 
 }
 
 bool MyMesh::formatFileSystem() {
-#if defined(NRF52_PLATFORM)
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   return InternalFS.format();
 #elif defined(RP2040_PLATFORM)
   return LittleFS.format();
@@ -983,6 +985,8 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       addSystemPost(msg);
       snprintf(reply, MAX_POST_TEXT_LEN, "OK");
     }
+  } else if (memcmp(command, "set repeat on", 13) == 0) {
+    strcpy(reply, "ERR - repeat now deprecated");
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
