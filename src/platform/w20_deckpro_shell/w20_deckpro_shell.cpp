@@ -1319,7 +1319,10 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
 
     const bool suppress_lvgl =
         s_menu_present_active || ui_deckpro_lvgl_touch_suppressed() || w20_epd_nav_touch_lock_active();
-    uint8_t touched = touch.getPoint(&last_x, &last_y, 1);
+    uint8_t touched = 0;
+    if (peri_init_st[E_PERI_TOUCH]) {
+        touched = touch.getPoint(&last_x, &last_y, 1);
+    }
 
 #if W20_DECKPRO_FLIP_Y
     const lv_coord_t lv_y = (lv_coord_t)((LCD_VER_SIZE - 1) - last_y);
@@ -1640,6 +1643,8 @@ void w20_deckpro_shell_init(void)
         }
     }
 
+    /* Shutdown 会 hold TOUCH_RST；开机先解除，避免 reset 拉低无效 */
+    gpio_hold_dis((gpio_num_t)BOARD_TOUCH_RST);
     gpio_hold_dis((gpio_num_t)BOARD_LORA_EN);
     gpio_hold_dis((gpio_num_t)BOARD_GPS_EN);
     gpio_deep_sleep_hold_dis();
@@ -1687,7 +1692,11 @@ void w20_deckpro_shell_init(void)
 
     touch.setPins(BOARD_TOUCH_RST, BOARD_TOUCH_INT);
     peri_init_st[E_PERI_INK_SCREEN] = ink_screen_init_hsipi();
+    /* begin 失败不阻塞开机（getPoint 已防空指针） */
     peri_init_st[E_PERI_TOUCH] = touch.begin(Wire, BOARD_I2C_ADDR_TOUCH, BOARD_TOUCH_SDA, BOARD_TOUCH_SCL);
+    if (!peri_init_st[E_PERI_TOUCH]) {
+        Serial.println("[W20UI] touch init failed - continue without touch");
+    }
 
     lvgl_init_shell();
     ui_deckpro_entry();

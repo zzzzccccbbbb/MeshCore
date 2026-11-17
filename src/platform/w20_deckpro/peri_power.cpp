@@ -197,8 +197,8 @@ static void power_peripherals_stop(void)
     WiFi.mode(WIFI_OFF);
 
 #if USE_TOUCH
-    touch.sleep();
-    Serial.println("W20 shutdown: CST3530 touch sleep");
+    touch.sleep(); /* LP_MODE，避免 DEEPSLEEP 后 Reset 起不来 */
+    Serial.println("W20 shutdown: CST3530 touch LP_MODE");
     Wire.end();
 #endif
 

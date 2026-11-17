@@ -116,7 +116,10 @@ public:
     uint8_t getPoint(int16_t *x_array, int16_t *y_array, uint8_t size = 1)
     {
         if (!x_array || !y_array || !size) return 0;
-
+        /* begin/initImpl 失败时 hyn_data 仍为 NULL；旧逻辑直接解引用 → LoadProhibited 开机死循环 */
+        if (!hyn_data || !hyn_66xxdata) {
+            return 0;
+        }
 
         // 读取触摸数据
         int ret = cst66xx_report();
@@ -190,7 +193,8 @@ public:
     {
         if (!__wire)
             return;
-        (void)cst66xx_set_workmode(DEEPSLEEP, 0);
+        /* DEEPSLEEP 后常电+EN 复位无法可靠唤醒；关机/软睡改用 LP_MODE */
+        (void)cst66xx_set_workmode(LP_MODE, 0);
     }
 
     void wakeup()
@@ -285,6 +289,9 @@ public:
 
     int cst66xx_report(void)
     {
+        if (!hyn_66xxdata) {
+            return -1;
+        }
         uint8_t buf[80],i=0;
         uint8_t finger_num = 0,key_num=0,report_typ= 0,key_state=0,key_id = 0,tmp_dat=0;
         int ret = 0,retry = 2;
@@ -455,17 +462,19 @@ private:
         struct tp_info ic;
         int ret = 0;
         int retry = 5;
-        while(--retry){
-            //get all config info
-            ret |= cst66xx_set_workmode(NOMAL_MODE,1);
-            ret |= wrRegister(0xD0030000,0x80|4,buf,50);
-            if(ret == 0 && buf[3]==0xCA && buf[2]==0xCA) break; 
+        while (--retry) {
+            ret = 0;
+            ret |= cst66xx_set_workmode(NOMAL_MODE, 1);
+            ret |= wrRegister(0xD0030000, 0x80 | 4, buf, 50);
+            if (ret == 0 && buf[3] == 0xCA && buf[2] == 0xCA) {
+                break;
+            }
             delay(1);
-            ret |= wrRegister(0xD0000400,4,buf,0);
+            ret |= wrRegister(0xD0000400, 4, buf, 0);
         }
 
-        if(ret || retry==0){
-            Serial.printf("cst66xx_updata_tpinfo failed");
+        if (ret || retry == 0) {
+            Serial.println("cst66xx_updata_tpinfo failed");
             return false;
         }
 
